@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meridian</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141a22'/%3E%3Cpath d='M6 22 L13 12 L18 18 L26 8' stroke='%23f0b34a' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand" title="Meridian">
+    <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><path d="M5 23 L12.5 12 L18 18.5 L27 7" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="27" cy="7" r="2.6" fill="currentColor"/></svg>
+    <span>Meridian</span>
+  </div>
+  <div class="search">
+    <input id="symbol-input" type="text" placeholder="Symbol or company…" autocomplete="off" spellcheck="false" aria-label="Symbol search">
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+  <nav id="nav">
+    <button data-view="chart" class="on">Charts</button>
+    <button data-view="scanner">Scanner</button>
+    <button data-view="strategy">Strategy Tester</button>
+    <button data-view="alerts">Alerts &amp; Bots <span id="alert-badge" class="badge" hidden></span></button>
+    <button data-view="studio">Indicator Studio</button>
+    <button data-view="lab">Model Lab</button>
+    <button data-view="seasonality">Seasonality</button>
+  </nav>
+  <div class="top-right">
+    <span id="data-status" class="status" title="Price data: Yahoo chart feed via the local server, cached. Delayed; not for order routing."></span>
+    <button id="theme-btn" class="icon-btn" title="Toggle light / dark">◐</button>
+  </div>
+</header>
+
+<main>
+  <section id="view-chart" class="view on">
+    <div class="chart-toolbar" id="chart-toolbar"></div>
+    <div class="chart-body">
+      <div class="draw-tools" id="draw-tools"></div>
+      <div class="chart-grid" id="chart-grid"></div>
+      <aside class="side" id="side">
+        <div class="side-sec" id="watchlist"></div>
+        <div class="side-sec grow" id="analysis"></div>
+      </aside>
+    </div>
+  </section>
+  <section id="view-scanner" class="view"></section>
+  <section id="view-strategy" class="view"></section>
+  <section id="view-alerts" class="view"></section>
+  <section id="view-studio" class="view"></section>
+  <section id="view-lab" class="view"></section>
+  <section id="view-seasonality" class="view"></section>
+</main>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
