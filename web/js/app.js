@@ -1,5 +1,5 @@
 // App shell: navigation, chart panels, toolbar, drawing tools, watchlist, analysis panel.
-import { h, clear, store, bus, toast, modal, menu, uid, fmtPrice, fmtPct, fmtNum, fmtStamp } from './util.js';
+import { h, clear, store, bus, toast, modal, menu, uid, fmtPrice, fmtPct, fmtNum, fmtStamp, downloadText, parseWorkspace } from './util.js';
 import { TFS, TF, tfLabel, isIntraday, getBars, getBatch, searchSymbols, alignToBase, tfsAtOrAbove } from './data.js';
 import { IND, calcIndicator, defaultParams, indLabel, sma, rsi } from './ta.js';
 import { autoTrendlines, autoLevels, autoFib, detectCandles, chartPatterns, openGaps } from './auto.js';
@@ -13,7 +13,7 @@ import { loadModels } from './lab.js';
 const $ = (id) => document.getElementById(id);
 const mkInd = (id, params = {}) => ({ uid: uid(), id, params, tf: null, hidden: false, colors: {} });
 const defaultPanel = (symbol = 'SPY', tf = '1d') => ({
-  symbol, tf, type: 'candles', log: false, volume: true, vp: false,
+  symbol, tf, type: 'candles', log: false, volume: true, vp: false, adj: false,
   inds: [mkInd('sma', { len: 50 }), mkInd('sma', { len: 200 }), mkInd('rsi')],
   auto: { trendlines: true, levels: true, fib: false, candles: true, patterns: true, gaps: false },
 });
@@ -44,13 +44,14 @@ class Panel {
       onContext: (c) => chartMenu(this, c),
       onTool: (t) => setTool(t),
       onText: (d) => editText(this, d),
+      onHover: (t) => { for (const p of panels) if (p !== this) p.chart.setGhost(t); },
     });
   }
   async load({ keepView = false } = {}) {
     const { symbol, tf } = this.cfg, token = ++this.token;
     if (!keepView) { this.chart.setBars(null); this.chart.setMessage(`Loading ${symbol}…`); }
     try {
-      const bars = await getBars(symbol, tf, { maxAge: keepView ? 45000 : 60000 });
+      const bars = await getBars(symbol, tf, { maxAge: keepView ? 45000 : 60000, adjusted: !!this.cfg.adj });
       if (token !== this.token) return;
       const fresh = this.bars !== bars;
       this.bars = bars;
@@ -76,12 +77,13 @@ class Panel {
       let out;
       try {
         if (htf) {
-          const hb = await getBars(bars.symbol, htf), raw = calcIndicator(c.id, hb, params);
+          const hb = await getBars(bars.symbol, htf, { adjusted: !!this.cfg.adj }), raw = calcIndicator(c.id, hb, params);
           out = raw.__error ? raw : Object.fromEntries(def.outputs.map((o) => [o.k, alignToBase(bars, hb, raw[o.k])]));
         } else out = calcIndicator(c.id, bars, params);
       } catch (e) { out = { __error: e.message }; }
       const colors = {}; for (const o of def.outputs) colors[o.k] = (c.colors && c.colors[o.k]) || o.color;
-      list.push({ uid: c.uid, def, params, tf: htf, out, label: indLabel(def, params), hidden: c.hidden, colors });
+      const label = c.id === 'avwap' && params.anchor ? `AVWAP from ${fmtStamp(params.anchor, isIntraday(bars.tf))}` : indLabel(def, params);
+      list.push({ uid: c.uid, def, params, tf: htf, out, label, hidden: c.hidden, colors });
     }
     if (this.bars !== bars) return;
     this.chart.setIndicators(list);
@@ -106,6 +108,7 @@ class Panel {
 
 function buildPanels() {
   const grid = $('chart-grid'), count = state.layout;
+  for (const p of panels) { p.token++; p.chart.destroy(); }
   clear(grid); grid.className = 'chart-grid l' + count;
   while (state.cfgs.length < count) { const src = state.cfgs[0]; const c = JSON.parse(JSON.stringify(src)); c.inds.forEach((i) => (i.uid = uid())); c.tf = ['1d', '1w', '1h', '15m'][state.cfgs.length] || '1d'; state.cfgs.push(c); }
   panels = state.cfgs.slice(0, count).map((cfg, i) => new Panel(cfg, i));
@@ -140,7 +143,8 @@ function buildToolbar() {
     h('div', { class: 'grp' },
       h('button', { onclick: indicatorPicker, title: 'Add an indicator' }, 'ƒ Indicators'),
       h('button', { id: 'tb-auto', onclick: autoMenu, title: 'Automated analysis layers' }, 'Auto analysis ▾')),
-    h('div', { class: 'grp' }, tog('tb-vol', 'Vol', 'Volume bars', 'volume'), tog('tb-vp', 'VP', 'Volume by price for the visible range', 'vp'), tog('tb-log', 'Log', 'Logarithmic price scale', 'log')),
+    h('div', { class: 'grp' }, tog('tb-vol', 'Vol', 'Volume bars', 'volume'), tog('tb-vp', 'VP', 'Volume by price for the visible range', 'vp'), tog('tb-log', 'Log', 'Logarithmic price scale', 'log'),
+      h('button', { id: 'tb-adj', title: 'Dividend-adjusted prices (total return) on daily and longer timeframes', onclick: () => { const c = cur().cfg; c.adj = !c.adj; save(); syncToolbar(); cur().load(); } }, 'Adj')),
     h('div', { class: 'grp' },
       h('select', { id: 'tb-layout', title: 'Layout', onchange: (e) => { state.layout = Number(e.target.value); save(); buildPanels(); } }, [[1, '1 chart'], [2, '2 charts'], [4, '4 charts']].map(([v, l]) => h('option', { value: v, selected: state.layout === v }, l)))),
     h('div', { class: 'grp' },
@@ -151,7 +155,7 @@ function syncToolbar() {
   const c = cur() && cur().cfg; if (!c) return;
   document.querySelectorAll('#tb-tf button').forEach((b) => b.classList.toggle('on', b.dataset.tf === c.tf));
   $('tb-type').value = c.type;
-  $('tb-vol').classList.toggle('on', c.volume); $('tb-vp').classList.toggle('on', c.vp); $('tb-log').classList.toggle('on', c.log);
+  $('tb-vol').classList.toggle('on', c.volume); $('tb-vp').classList.toggle('on', c.vp); $('tb-log').classList.toggle('on', c.log); $('tb-adj').classList.toggle('on', !!c.adj);
   $('tb-trades').hidden = !(cur().trades && cur().trades.length);
   $('symbol-input').placeholder = `${c.symbol} — type to search`;
 }
@@ -186,6 +190,7 @@ function chartMenu(p, c) {
     { label: `Alert when price crosses ${fmtPrice(c.price)}`, fn: () => { alerts.addPriceAlert(sym, c.price); toast(`Alert set on ${sym} at ${fmtPrice(c.price)}`, 'ok'); } },
     lineLike ? { label: 'Alert when price crosses this line', fn: () => { alerts.addLineAlert(sym, p.cfg.tf, d); toast(`Line alert set on ${sym}`, 'ok'); } } : null,
     '-',
+    { label: `Anchor a VWAP at ${fmtStamp(c.barT, isIntraday(p.cfg.tf))}`, fn: () => { p.cfg.inds.push(mkInd('avwap', { anchor: c.barT })); save(); p.compute(); } },
     { label: 'Add horizontal line here', fn: () => p.chart.addDrawing({ type: 'hline', pts: [{ t: c.t, p: c.price }] }) },
     d ? { label: 'Delete drawing', fn: () => p.chart.deleteSelected() } : null,
     loadDrawings(sym).length ? { label: `Delete all drawings on ${sym}`, fn: () => { saveDrawings(sym, []); for (const q of panels) if (q.cfg.symbol === sym) q.chart.setDrawings([]); } } : null,
@@ -224,6 +229,7 @@ function indicatorSettings(p, c) {
   let tf = c.tf || '';
   const form = h('div', { class: 'form' });
   for (const q of def.params) {
+    if (q.hidden) continue;
     let inp;
     if (q.type === 'source' || q.type === 'select') {
       const opts = q.type === 'source' ? ['close', 'open', 'high', 'low', 'hl2', 'hlc3', 'ohlc4', 'volume'] : q.options;
@@ -296,7 +302,7 @@ async function renderAnalysis() {
   body.append(h('h4', null, 'Multi-timeframe'), tbl);
   const byTf = new Map([[b.tf, b]]);
   for (const tf of tfs) {
-    let bb; try { bb = tf === b.tf ? b : await getBars(p.cfg.symbol, tf); } catch { continue; }
+    let bb; try { bb = tf === b.tf ? b : await getBars(p.cfg.symbol, tf, { adjusted: !!p.cfg.adj }); } catch { continue; }
     if (token !== anToken) return;
     byTf.set(tf, bb);
     const n = bb.t.length, c = bb.c[n - 1], cell = (len) => { const v = sma(bb.c, len)[n - 1]; if (v !== v) return h('td', { class: 'muted' }, '–'); const d = (c / v - 1) * 100; return h('td', { class: d >= 0 ? 'up' : 'dn', title: `SMA ${len} = ${fmtPrice(v)}` }, (d >= 0 ? '▲ ' : '▼ ') + Math.abs(d).toFixed(1) + '%'); };
@@ -320,7 +326,7 @@ async function renderAnalysis() {
   if (!saved[checklistName]) checklistName = names[0];
   body.append(h('select', { style: { width: '100%', marginBottom: '6px' }, onchange: (e) => { checklistName = e.target.value; store.set('checklist', checklistName); renderAnalysis(); } }, names.map((k) => h('option', { value: k, selected: k === checklistName }, k))));
   const rs = saved[checklistName];
-  for (const tf of requiredTfs(rs, b.tf)) if (!byTf.has(tf)) { try { byTf.set(tf, await getBars(p.cfg.symbol, tf)); } catch { /* condition reads false */ } }
+  for (const tf of requiredTfs(rs, b.tf)) if (!byTf.has(tf)) { try { byTf.set(tf, await getBars(p.cfg.symbol, tf, { adjusted: !!p.cfg.adj })); } catch { /* condition reads false */ } }
   if (token !== anToken) return;
   const { per, mask } = evalRuleset(rs, b, byTf);
   rs.conds.forEach((c, k) => { const okk = per[k][n - 1]; body.append(h('div', { class: 'check' }, h('b', { class: okk ? 'up' : 'dn' }, okk ? '✓' : '✗'), h('span', null, describeCond(c, b.tf)))); });
@@ -353,6 +359,30 @@ function initSearch() {
   });
 }
 
+// ───────────────────────── workspace backup ─────────────────────────
+// Everything the app saves lives in this browser's local storage; this is the way to move or keep it.
+const WS_PREFIX = 'meridian.';
+function exportWorkspace() {
+  const data = {};
+  for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k.startsWith(WS_PREFIX)) data[k] = localStorage.getItem(k); }
+  downloadText(`meridian-workspace-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ app: 'meridian', version: 1, saved: new Date().toISOString(), data }, null, 1), 'application/json');
+  toast(`Exported ${Object.keys(data).length} saved items.`, 'ok');
+}
+async function importWorkspace(e) {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try {
+    const entries = parseWorkspace(await f.text(), WS_PREFIX);
+    const body = h('div', null, h('p', null, `This replaces everything saved in this browser (layouts, watchlists, drawings, rules, scripts, models, alerts) with the ${entries.length} items in “${f.name}”.`),
+      h('div', { class: 'modal-foot' }, h('button', { onclick: () => m.close() }, 'Cancel'), h('button', { class: 'primary', onclick: () => {
+        for (const k of Object.keys(localStorage)) if (k.startsWith(WS_PREFIX)) localStorage.removeItem(k);
+        for (const [k, v] of entries) localStorage.setItem(k, v);
+        location.reload();
+      } }, 'Replace and reload')));
+    const m = modal('Import workspace', body);
+  } catch (err) { toast('Could not import: ' + err.message, 'err'); }
+}
+
 // ───────────────────────── views ─────────────────────────
 const mounted = {};
 const loaders = {
@@ -382,6 +412,14 @@ function init() {
     bus.emit('theme');
   });
   document.querySelectorAll('#nav button').forEach((b) => b.addEventListener('click', () => goto(b.dataset.view)));
+  $('ws-btn').addEventListener('click', (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    menu(r.right - 230, r.bottom + 4, [
+      { label: 'Export workspace to a file', fn: exportWorkspace },
+      { label: 'Import workspace from a file…', fn: () => $('ws-file').click() },
+    ]);
+  });
+  $('ws-file').addEventListener('change', importWorkspace);
 
   Object.assign(api, {
     openChart(symbol, tf) { goto('chart'); setSymbol(symbol, tf); },

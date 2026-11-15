@@ -81,10 +81,11 @@ function auc(p, y) {
   const neg = p.length - pos; return pos && neg ? (rank - (pos * (pos + 1)) / 2) / (pos * neg) : NaN;
 }
 
-function train(bars, c) {
+export function train(bars, c) {
   const n = bars.t.length, H = c.horizon, X = matrix(bars, c.features), samples = [];
   for (let i = 0; i < n - H; i++) if (X[i]) samples.push(i);
   if (samples.length < 300) throw new Error(`only ${samples.length} usable bars; need at least 300`);
+  if (H * 4 > samples.length * 0.3) throw new Error(`looking ${H} bars ahead leaves too little history to test on; use a shorter horizon`);
   const fwd = (i) => (bars.c[i + H] / bars.c[i] - 1) * 100, label = (i) => (fwd(i) > c.threshold ? 1 : 0);
   const split = Math.floor(samples.length * 0.7), testIdx = samples.slice(split);
   // embargo: drop training rows whose label window reaches into the test period
@@ -106,11 +107,13 @@ function train(bars, c) {
   };
 }
 
-function toIndicator(m) {
+export function toIndicator(m) {
   return {
     id: 'model:' + m.id, name: `Model · ${m.name}`, short: m.name, group: 'Models', overlay: false, params: [], rev: m.id,
     outputs: [{ k: 'p', label: 'P(up)', color: '#f0b34a', style: 'line' }], levels: [0.5], range: [0, 1],
-    calc: (bars) => { const X = matrix(bars, m.features); return { p: X.map((r) => (r ? predict(m.model, scale(r, m.norm)) : NaN)) }; },
+    // Blank before the test period began: those bars were used to fit the model, so a backtest
+    // or scan reading them would be grading the model on its own training data.
+    calc: (bars) => { const X = matrix(bars, m.features), from = m.splitT || 0; return { p: X.map((r, i) => (r && bars.t[i] >= from ? predict(m.model, scale(r, m.norm)) : NaN)) }; },
   };
 }
 let models = null;
@@ -166,7 +169,7 @@ function report() {
     edge < 0.02 ? 'No usable edge out of sample: the model ranks future moves about as well as a coin flip.' :
       edge < 0.05 ? 'A faint edge out of sample. Small enough that costs or a different period could erase it.' : 'A measurable edge out of sample on this one split. Check it on other symbols and periods before relying on it.';
   resEl.append(h('div', { class: 'row' }, h('h2', null, `${m.symbol} · ${tfLabel(m.tf)} · up more than ${m.threshold}% in ${m.horizon} bars`), h('span', { class: 'spacer' }),
-    h('button', { class: 'primary', onclick: async () => { const { ask } = await import('./conditions.js'); const name = await ask('Save model', `${m.symbol} ${m.horizon}-bar`, 'Name'); if (!name) return; const rec = { ...m, id: uid(), name }; models.unshift(rec); persist(); T.registerIndicator(toIndicator(rec)); mount.redraw(); toast('Saved. Find it under “Models” in any indicator list.', 'ok'); } }, 'Save as indicator')),
+    h('button', { class: 'primary', onclick: async () => { const { ask } = await import('./conditions.js'); const name = await ask('Save model', `${m.symbol} ${m.horizon}-bar`, 'Name'); if (!name) return; const rec = { ...m, id: uid(), name }; models.unshift(rec); persist(); T.registerIndicator(toIndicator(rec)); mount.redraw(); toast('Saved under “Models”. It is blank before its test period, so it cannot be backtested on the data it learned from.', 'ok', 9000); } }, 'Save as indicator')),
     h('p', { class: 'hint' }, `Fitted on ${fmtStamp(m.trainFrom, intr)} → ${fmtStamp(m.splitT, intr)} (${k.nTrain} bars), scored on ${fmtStamp(m.splitT, intr)} → ${fmtStamp(m.testTo, intr)} (${k.nTest} bars).`),
     h('div', { class: 'card', style: { margin: '8px 0' } }, h('b', null, verdict)),
     h('div', { class: 'cards' },

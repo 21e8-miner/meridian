@@ -5,6 +5,7 @@
 //   • Stops, targets and trailing stops are checked inside each bar from the entry bar on. If the
 //     bar opens beyond the level, the fill is the open (gap); otherwise the level itself.
 //   • If a stop and a target are both inside one bar, the stop is assumed to have come first.
+//   • No new position is opened once equity is at or below zero.
 //   • A trailing stop uses the best price up to the previous bar.
 
 export function runBacktest(bars, entry, exit, o = {}) {
@@ -22,7 +23,7 @@ export function runBacktest(bars, entry, exit, o = {}) {
   for (let i = Math.max(0, from); i < n; i++) {
     const O = bars.o[i], H = bars.h[i], L = bars.l[i], C = bars.c[i];
     if (pos && pos.exitNext) close(i, O, 'signal');
-    if (!pos && pending) {
+    if (!pos && pending && eq > 0) {
       const entryP = O * (1 + dir * slip), notional = (eq * sizePct) / 100, f = notional * fee;
       eq -= f;
       pos = { i, entryP, qty: notional / entryP, fee: f, notional, best: entryP, exitNext: false };
@@ -35,8 +36,12 @@ export function runBacktest(bars, entry, exit, o = {}) {
       if (trailPct > 0) { const tr = pos.best * (1 - (dir * trailPct) / 100); if (stop !== stop || dir * (tr - stop) > 0) { stop = tr; kind = 'trail'; } }
       const target = targetPct > 0 ? pos.entryP * (1 + (dir * targetPct) / 100) : NaN, entryBar = pos.i === i;
       const hitStop = stop === stop && (dir > 0 ? L <= stop : H >= stop), hitTarget = target === target && (dir > 0 ? H >= target : L <= target);
-      if (hitStop) close(i, !entryBar && (dir > 0 ? O < stop : O > stop) ? O : stop, kind);
-      else if (hitTarget) close(i, !entryBar && (dir > 0 ? O > target : O < target) ? O : target, 'target');
+      // The open comes first: a bar that opens through a level fills there, at the open.
+      const gapStop = !entryBar && stop === stop && (dir > 0 ? O <= stop : O >= stop), gapTarget = !entryBar && target === target && (dir > 0 ? O >= target : O <= target);
+      if (gapStop) close(i, O, kind);
+      else if (gapTarget) close(i, O, 'target');
+      else if (hitStop) close(i, stop, kind);
+      else if (hitTarget) close(i, target, 'target');
       else {
         pos.best = dir > 0 ? Math.max(pos.best, H) : Math.min(pos.best, L);
         if (maxBars > 0 && i - pos.i + 1 >= maxBars) close(i, C, 'time');

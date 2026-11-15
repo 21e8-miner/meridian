@@ -1,5 +1,5 @@
 // Market scanner: multi-factor, multi-timeframe rules run across a symbol list.
-import { h, clear, store, toast, fmtPrice, fmtPct, fmtVol, fmtNum } from './util.js';
+import { h, clear, store, toast, fmtPrice, fmtPct, fmtVol, fmtNum, downloadText, toCsv } from './util.js';
 import { TFS, TF, tfLabel, getBatch, UNIVERSES } from './data.js';
 import { sma } from './ta.js';
 import { ruleBuilder, evalRuleset, requiredTfs, describeRuleset, operandLabel, leftValue, cmp, price, num, ind, newRuleset } from './conditions.js';
@@ -81,6 +81,7 @@ async function run() {
 function draw(rs, tf, errors) {
   clear(resEl);
   resEl.append(h('div', { class: 'row' }, h('h2', null, `${rows.length} match${rows.length === 1 ? '' : 'es'} · ${cfg.universe} · ${tfLabel(tf)}`), h('span', { class: 'spacer' }),
+    rows.length ? h('button', { title: 'Download these matches as a CSV file', onclick: () => downloadText(`scan-${tf}-${new Date().toISOString().slice(0, 10)}.csv`, toCsv([cols.map(([, l]) => l), ...rows.map((r) => cols.map(([k]) => (typeof r[k] === 'number' ? +r[k].toFixed(4) : r[k])))]), 'text/csv') }, 'Export CSV') : null,
     rows.length ? h('button', { onclick: () => { api.setWatchlist('Scan results', rows.map((r) => r.sym)); toast('Saved to the watchlist “Scan results”.', 'ok'); } }, 'Save as watchlist') : null),
     h('p', { class: 'hint' }, describeRuleset(rs, tf)));
   const nErr = Object.keys(errors || {}).length;

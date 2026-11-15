@@ -58,7 +58,25 @@ export function fmtDate(t) { const d = new Date(t * 1000); return `${MON[d.getUT
 export function fmtTime(t) { const d = new Date(t * 1000); return `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`; }
 export function fmtStamp(t, intraday) { return intraday ? `${fmtDate(t)} ${fmtTime(t)}` : fmtDate(t); }
 export function fmtIso(t) { const d = new Date(t * 1000); return `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`; }
+export function fmtIsoTime(t) { const d = new Date(t * 1000); return `${fmtIso(t)} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}`; }
 export { MON };
+
+// Offer text as a file download (CSV exports, workspace backup).
+export function downloadText(name, text, mime = 'text/plain') {
+  const url = URL.createObjectURL(new Blob([text], { type: mime })), a = document.createElement('a');
+  a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+// Validate a workspace backup and return its [key, value] pairs. Throws with a reason if it is not one.
+export function parseWorkspace(text, prefix = 'meridian.') {
+  const j = JSON.parse(text);
+  if (!j || j.app !== 'meridian' || typeof j.data !== 'object' || !j.data) throw new Error('not a Meridian workspace file');
+  const entries = Object.entries(j.data).filter(([k, v]) => k.startsWith(prefix) && typeof v === 'string');
+  for (const [k, v] of entries) { try { JSON.parse(v); } catch { throw new Error(`item “${k}” is damaged`); } }
+  if (!entries.length) throw new Error('the file holds no saved items');
+  return entries;
+}
+export function toCsv(rows) { return rows.map((r) => r.map((v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(',')).join('\n') + '\n'; }
 
 const NS = 'meridian.';
 export const store = {

@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(ROOT, "web")
-CACHE = os.path.join(ROOT, ".cache")
+CACHE = os.path.join(ROOT, ".cache", "v2")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8830"))
 UA = "Mozilla/5.0"  # the provider rate-limits long browser-style agents
 TIMEOUT = 12
@@ -101,6 +101,12 @@ def _fetch_yahoo(symbol: str, tf: str) -> dict:
             doc = json.loads(e.read().decode("utf-8"))
         except Exception:
             raise RuntimeError(f"HTTP {e.code} from data provider")
+    return parse_chart(doc, symbol, tf)
+
+
+def parse_chart(doc: dict, symbol: str, tf: str) -> dict:
+    """Turn a provider chart document into Meridian bars. Pure; see tests/test_server.py."""
+    interval_sec = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "1d": 86400}[tf]
     chart = doc.get("chart") or {}
     if chart.get("error"):
         raise RuntimeError(chart["error"].get("description") or "provider error")
@@ -108,22 +114,28 @@ def _fetch_yahoo(symbol: str, tf: str) -> dict:
     if not res or not res.get("timestamp"):
         raise RuntimeError("no data for symbol")
     meta = res.get("meta") or {}
-    q = (res.get("indicators") or {}).get("quote", [{}])[0]
+    ind = res.get("indicators") or {}
+    q = (ind.get("quote") or [{}])[0]
     ts = res["timestamp"]
     O, H, L, C, V = q.get("open"), q.get("high"), q.get("low"), q.get("close"), q.get("volume")
+    if not (O and H and L and C):
+        raise RuntimeError("no price columns for symbol")
+    daily = tf == "1d"
+    ADJ = ((ind.get("adjclose") or [{}])[0].get("adjclose")) if daily else None
     tzname = meta.get("exchangeTimezoneName") or "America/New_York"
     try:
         tz = ZoneInfo(tzname)
     except Exception:
         tz = ET
-    daily = tf == "1d"
+    has_volume = bool(V) and any(x for x in V if x)
     off_cache: dict[int, int] = {}
-    t_out, o_out, h_out, l_out, c_out, v_out = [], [], [], [], [], []
+    t_out, o_out, h_out, l_out, c_out, v_out, a_out = [], [], [], [], [], [], []
     for i, t in enumerate(ts):
         o, h, l, c = O[i], H[i], L[i], C[i]
-        if o is None or h is None or l is None or c is None:
+        if o is None or h is None or l is None or c is None or c <= 0:
             continue
         v = V[i] if V and V[i] is not None else 0
+        adj = ADJ[i] if ADJ and i < len(ADJ) and ADJ[i] is not None and ADJ[i] > 0 else c
         if daily:
             d = datetime.fromtimestamp(t, tz).date()
             lt = calendar.timegm(d.timetuple())
@@ -134,13 +146,26 @@ def _fetch_yahoo(symbol: str, tf: str) -> dict:
                 off = int(datetime.fromtimestamp(t, tz).utcoffset().total_seconds())
                 off_cache[day] = off
             lt = t + off
-        if t_out and lt <= t_out[-1]:
-            if lt == t_out[-1]:
-                # the provider sometimes repeats the live session as a second row: merge it
-                h_out[-1] = max(h_out[-1], _round(h))
-                l_out[-1] = min(l_out[-1], _round(l))
-                c_out[-1] = _round(c)
-                v_out[-1] = max(v_out[-1], int(v))
+        # Fold a row into the previous bar instead of adding it when it is
+        #   - a repeat of the same bar (the provider restates the live session), or
+        #   - an intraday "snapshot" row: off the bar grid, or a zero-volume flat print
+        #     (the closing price restated at 16:00, or the live price of a 24h market).
+        fold = False
+        if t_out:
+            if lt <= t_out[-1]:
+                if lt < t_out[-1]:
+                    continue
+                fold = True
+            elif not daily and i == len(ts) - 1:
+                # the flat-print test needs a symbol that reports volume: an index or FX pair is
+                # always zero-volume, and its newest bar is legitimately flat for a moment
+                fold = (lt - t_out[-1] < interval_sec) or (has_volume and v == 0 and o == h == l == c)
+        if fold:
+            h_out[-1] = max(h_out[-1], _round(h))
+            l_out[-1] = min(l_out[-1], _round(l))
+            c_out[-1] = _round(c)
+            v_out[-1] = max(v_out[-1], int(v)) if lt == t_out[-1] else v_out[-1] + int(v)
+            a_out[-1] = _round(adj)
             continue
         t_out.append(lt)
         o_out.append(_round(o))
@@ -148,9 +173,10 @@ def _fetch_yahoo(symbol: str, tf: str) -> dict:
         l_out.append(_round(min(l, o, c)))
         c_out.append(_round(c))
         v_out.append(int(v))
+        a_out.append(_round(adj))
     if not t_out:
         raise RuntimeError("no usable bars for symbol")
-    return {
+    out = {
         "symbol": symbol,
         "tf": tf,
         "t": t_out,
@@ -168,6 +194,10 @@ def _fetch_yahoo(symbol: str, tf: str) -> dict:
         },
         "fetched": int(time.time()),
     }
+    # Dividend-and-split adjusted close, daily only, and only when it differs from the close.
+    if daily and ADJ and any(abs(a_out[i] - c_out[i]) > 1e-9 for i in range(len(c_out))):
+        out["a"] = a_out
+    return out
 
 
 def _disk_path(symbol: str, tf: str) -> str:
@@ -230,8 +260,9 @@ def _trim(data: dict, limit: int) -> dict:
     if limit <= 0 or len(data["t"]) <= limit:
         return data
     out = dict(data)
-    for k in ("t", "o", "h", "l", "c", "v"):
-        out[k] = data[k][-limit:]
+    for k in ("t", "o", "h", "l", "c", "v", "a"):
+        if k in data:
+            out[k] = data[k][-limit:]
     return out
 
 

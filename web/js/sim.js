@@ -3,9 +3,11 @@ import { getBars } from './data.js';
 import { evalRuleset, requiredTfs } from './conditions.js';
 import { runBacktest, summarize } from './engine.js';
 
+// c.adjusted !== false: test on total-return prices (dividends reinvested) where the data has them.
 export async function prepare(symbol, c) {
-  const base = await getBars(symbol, c.tf), byTf = new Map([[c.tf, base]]);
-  for (const tf of new Set([...requiredTfs(c.entry, c.tf), ...requiredTfs(c.exit, c.tf)])) if (!byTf.has(tf)) byTf.set(tf, await getBars(symbol, tf));
+  const opt = { adjusted: c.adjusted !== false };
+  const base = await getBars(symbol, c.tf, opt), byTf = new Map([[c.tf, base]]);
+  for (const tf of new Set([...requiredTfs(c.entry, c.tf), ...requiredTfs(c.exit, c.tf)])) if (!byTf.has(tf)) byTf.set(tf, await getBars(symbol, tf, opt));
   return { base, byTf };
 }
 export function simulate(base, byTf, c, extra = {}) {

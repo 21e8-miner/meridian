@@ -87,6 +87,7 @@ main { flex: 1; min-height: 0; position: relative; }
 .pane-legends .legend { left: 8px; }
 .lg-title { display: inline-flex; gap: 7px; align-items: baseline; margin-right: 10px; }
 .lg-title b { font-size: 14px; } .lg-tf { color: var(--accent); font-weight: 600; } .lg-name { color: var(--muted); }
+.lg-adj { border: 1px solid var(--line); color: var(--muted); border-radius: 3px; padding: 0 5px; font-size: 10px; text-transform: uppercase; pointer-events: auto; }
 .lg-stale { background: var(--down); color: #fff; border-radius: 3px; padding: 0 5px; font-size: 10px; text-transform: uppercase; pointer-events: auto; }
 .lg-ohlc { color: var(--muted); white-space: nowrap; } .lg-ohlc i, .lg-vals i { font-style: normal; color: var(--text); }
 .lg-ohlc i.up { color: var(--up); } .lg-ohlc i.dn { color: var(--down); }
@@ -151,6 +152,8 @@ canvas.plot { width: 100%; display: block; }
 .rb-cond .lbl { color: var(--muted); font-size: 12px; }
 .rb-add { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .rb-add button { font-size: 12px; padding: 3px 8px; }
+.rb-formula { width: 100%; font: 12px/1.5 var(--mono); margin: 2px 0; }
+.rb-err { color: var(--down); font-size: 12px; min-height: 0; } .rb-err:empty { display: none; }
 .rb-empty { color: var(--muted); padding: 6px; font-size: 12px; }
 
 /* modal, menus, toasts */

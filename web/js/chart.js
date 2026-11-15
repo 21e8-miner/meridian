@@ -30,7 +30,8 @@ export class Chart {
     this.g = this.canvas.getContext('2d');
     this.bars = null; this.inds = []; this.auto = {}; this.drawings = []; this.trades = []; this.alertLines = [];
     this.opt = { type: 'candles', log: false, volume: true, vp: false };
-    this.view = { right: 0, barW: 8 };
+    this.view = { right: 0, barW: 8, yScale: 1 };
+    this.ghostT = null;
     this.tool = 'cursor'; this.mouse = null; this.sel = null; this.draft = null; this.measure = null; this.drag = null;
     this.readTheme();
     this.bind();
@@ -44,6 +45,9 @@ export class Chart {
     this.th = { bg: v('--chart-bg'), grid: v('--grid'), line: v('--line'), text: v('--text'), muted: v('--muted'), up: v('--up'), down: v('--down'), accent: v('--accent'), panel: v('--panel') };
     this.invalidate();
   }
+
+  // Detach from the window and stop observing; call before discarding a chart.
+  destroy() { window.removeEventListener('mousemove', this.onMove); window.removeEventListener('mouseup', this.onUp); this.ro.disconnect(); this.pending = true; }
 
   // ── data in ──
   setBars(bars, { keepView = false } = {}) {
@@ -67,7 +71,9 @@ export class Chart {
   setAlertLines(a) { this.alertLines = a || []; this.invalidate(); }
   setOptions(o) { Object.assign(this.opt, o); this.ha = null; this.invalidate(); }
   setTool(t) { this.tool = t; this.draft = null; this.el.style.cursor = t === 'cursor' ? '' : 'crosshair'; this.invalidate(); }
-  resetView() { if (!this.bars) return; this.view.barW = 8; this.view.right = this.bars.t.length - 1 + 6; this.invalidate(); }
+  resetView() { if (!this.bars) return; this.view.barW = 8; this.view.yScale = 1; this.view.right = this.bars.t.length - 1 + 6; this.invalidate(); }
+  // Crosshair mirrored from another chart (linked charts): a bar time, or null.
+  setGhost(t) { if (t === this.ghostT) return; this.ghostT = t; this.invalidate(); }
   focusIndex(i) { const pw = this.w - AX; this.view.right = i + (pw / this.view.barW) * 0.35; this.invalidate(); }
 
   resize() {
@@ -161,6 +167,7 @@ export class Chart {
     const padT = 0.08, padB = this.opt.volume ? 0.2 : 0.08;
     let slo = log ? Math.log(lo) : lo, shi = log ? Math.log(hi) : hi;
     const sr = shi - slo; shi += sr * padT / (1 - padT - padB); slo -= sr * padB / (1 - padT - padB);
+    if (this.view.yScale !== 1) { const mid = (slo + shi) / 2, half = ((shi - slo) / 2) * this.view.yScale; slo = mid - half; shi = mid + half; }
     this.ms = { lo: slo, hi: shi, y0: L.main.y, hh: L.main.h, log };
 
     this.tticks = this.timeTicks(b, i0, i1);
@@ -403,14 +410,29 @@ export class Chart {
   }
 
   hoverIndex() {
-    if (!this.mouse || !this.bars) return null;
+    if (!this.bars) return null;
+    if (!this.mouse) { if (this.ghostT == null) return null; const g = Math.floor(this.tToIdx(this.ghostT) + 1e-9); return g >= 0 && g < this.bars.t.length ? g : null; }
     const i = Math.round(this.idxOf(this.mouse.x));
     return i >= 0 && i < this.bars.t.length ? i : null;
+  }
+  // Snap a point to the nearest bar and, when close, to that bar's open/high/low/close. Alt = free.
+  snapPt(x, y, e) {
+    const pt = this.xyPt(x, y), b = this.bars, i = Math.round(this.idxOf(x));
+    if ((e && e.altKey) || i < 0 || i >= b.t.length) return pt;
+    let best = null, bd = 10;
+    for (const p of [b.o[i], b.h[i], b.l[i], b.c[i]]) { const d = Math.abs(this.yOf(p) - y); if (d < bd) { bd = d; best = p; } }
+    return best == null ? pt : { t: b.t[i], p: best };
   }
 
   drawCrosshair(b) {
     const m = this.mouse, g = this.g, th = this.th, L = this.L;
-    if (!m || m.x > L.pw || m.y > this.h - TH) return;
+    if (!m) {
+      const gi = this.hoverIndex(); if (gi == null) return;
+      const gx = Math.round(this.xOf(gi)) + 0.5; if (gx < 0 || gx > L.pw) return;
+      g.save(); g.setLineDash([4, 4]); g.strokeStyle = rgba(th.accent, 0.7); g.beginPath(); g.moveTo(gx, 0); g.lineTo(gx, this.h - TH); g.stroke(); g.restore();
+      return;
+    }
+    if (m.x > L.pw || m.y > this.h - TH) return;
     const i = clamp(Math.round(this.idxOf(m.x)), 0, b.t.length - 1), x = Math.round(this.xOf(i)) + 0.5, y = Math.round(m.y) + 0.5;
     g.save(); g.setLineDash([4, 4]); g.strokeStyle = rgba(th.muted, 0.8); g.beginPath();
     g.moveTo(x, 0); g.lineTo(x, this.h - TH); g.moveTo(0, y); g.lineTo(L.pw, y); g.stroke(); g.restore();
@@ -577,56 +599,65 @@ export class Chart {
       if (e.target.closest && e.target.closest('.legend, .pane-legends')) return;
       if (this.cb.onFocus) this.cb.onFocus();
       const m = pos(e); this.measure = null;
+      if (m.x > this.L.pw && m.y < this.L.main.h) { this.drag = { kind: 'yzoom', y: m.y, s: this.view.yScale }; return; }
       if (m.x > this.L.pw || m.y > this.L.main.h) { this.drag = { kind: 'pan', x: m.x, right: this.view.right }; return; }
-      if (this.draft && this.draft.mode === 'click') { this.draft.pts[1] = this.xyPt(m.x, m.y); this.finishDraft(); return; }
+      if (this.draft && this.draft.mode === 'click') { this.draft.pts[1] = this.snapPt(m.x, m.y, e); this.finishDraft(); return; }
       if (this.tool === 'cursor') {
         const hit = this.hitTest(m.x, m.y);
         if (hit) { this.sel = hit.d; this.drag = { kind: 'draw', part: hit.part, x: m.x, y: m.y, orig: hit.d.pts.map((p) => ({ ...p })), moved: false }; }
         else { this.sel = null; this.drag = { kind: 'pan', x: m.x, right: this.view.right }; }
         this.invalidate(); return;
       }
-      const pt = this.xyPt(m.x, m.y);
+      const pt = this.snapPt(m.x, m.y, e);
       if (this.tool === 'hline') { this.addDrawing({ type: 'hline', pts: [pt] }); return; }
       if (this.tool === 'text') { const d = this.addDrawing({ type: 'text', pts: [pt], text: 'Note' }); if (this.cb.onText) this.cb.onText(d); return; }
       if (TWO_POINT.has(this.tool)) { this.draft = { id: uid(), type: this.tool, pts: [pt, { ...pt }], mode: 'drag', x: m.x, y: m.y }; this.invalidate(); }
     });
-    window.addEventListener('mousemove', (e) => {
+    this.onMove = (e) => {
       if (!this.bars) return;
       const m = pos(e), inside = m.x >= 0 && m.y >= 0 && m.x <= this.w && m.y <= this.h;
       if (this.drag && this.drag.kind === 'pan') { this.view.right = this.drag.right - (m.x - this.drag.x) / this.view.barW; this.clampView(); }
+      else if (this.drag && this.drag.kind === 'yzoom') this.view.yScale = clamp(this.drag.s * Math.exp((m.y - this.drag.y) * 0.006), 0.15, 10);
       else if (this.drag && this.drag.kind === 'draw') {
         const dg = this.drag, d = this.sel; dg.moved = true;
         if (dg.part === 'body') {
-          const di = (m.x - dg.x) / this.view.barW, s = this.ms;
+          const di = (m.x - dg.x) / this.view.barW;
           d.pts = dg.orig.map((p) => { const y = this.yOf(p.p) + (m.y - dg.y); return { t: this.idxToT(this.tToIdx(p.t) + di), p: this.priceOf(y) }; });
-          void s;
-        } else d.pts[dg.part] = this.xyPt(m.x, m.y);
-      } else if (this.draft) this.draft.pts[1] = this.xyPt(m.x, m.y);
+        } else d.pts[dg.part] = this.snapPt(m.x, m.y, e);
+      } else if (this.draft) this.draft.pts[1] = this.snapPt(m.x, m.y, e);
       const was = this.mouse;
       this.mouse = inside && !(e.target.closest && e.target.closest('.legend button')) ? m : null;
+      if (this.cb.onHover) { const hi = this.mouse && this.mouse.x <= this.L.pw ? this.hoverIndex() : null, ht = hi == null ? null : this.bars.t[hi]; if (ht !== this.lastHoverT) { this.lastHoverT = ht; this.cb.onHover(ht); } }
       if (this.mouse || was || this.drag) this.invalidate();
-    });
-    window.addEventListener('mouseup', (e) => {
+    };
+    this.onUp = (e) => {
       if (this.drag) { if (this.drag.kind === 'draw' && this.drag.moved) this.changed(); this.drag = null; }
       if (this.draft && this.draft.mode === 'drag') {
         const m = pos(e);
         if (Math.hypot(m.x - this.draft.x, m.y - this.draft.y) < 4) this.draft.mode = 'click'; else this.finishDraft();
       }
-    });
-    el.addEventListener('mouseleave', () => { if (!this.drag) { this.mouse = null; this.invalidate(); } });
+    };
+    window.addEventListener('mousemove', this.onMove);
+    window.addEventListener('mouseup', this.onUp);
+    el.addEventListener('mouseleave', () => { if (!this.drag) { this.mouse = null; if (this.cb.onHover && this.lastHoverT != null) { this.lastHoverT = null; this.cb.onHover(null); } this.invalidate(); } });
     el.addEventListener('dblclick', (e) => {
-      const m = pos(e), hit = this.hitTest(m.x, m.y);
+      const m = pos(e);
+      if (m.x > this.L.pw) { this.view.yScale = 1; this.invalidate(); return; }
+      const hit = this.hitTest(m.x, m.y);
       if (hit && hit.d.type === 'text' && this.cb.onText) this.cb.onText(hit.d); else if (!hit) this.resetView();
     });
     el.addEventListener('contextmenu', (e) => {
       if (!this.bars) return; e.preventDefault();
       const m = pos(e); if (m.x > this.L.pw || m.y > this.L.main.h) return;
       const hit = this.hitTest(m.x, m.y); if (hit) { this.sel = hit.d; this.invalidate(); }
-      if (this.cb.onContext) this.cb.onContext({ x: e.clientX, y: e.clientY, price: this.priceOf(m.y), t: this.idxToT(this.idxOf(m.x)), drawing: hit ? hit.d : null });
+      const bi = clamp(Math.round(this.idxOf(m.x)), 0, this.bars.t.length - 1);
+      if (this.cb.onContext) this.cb.onContext({ x: e.clientX, y: e.clientY, price: this.priceOf(m.y), t: this.idxToT(this.idxOf(m.x)), barT: this.bars.t[bi], drawing: hit ? hit.d : null });
     });
     el.addEventListener('keydown', (e) => {
       if (e.key === 'Delete' || e.key === 'Backspace') { if (this.deleteSelected()) e.preventDefault(); }
       else if (e.key === 'Escape') { this.draft = null; this.measure = null; this.sel = null; if (this.cb.onTool) this.cb.onTool('cursor'); this.invalidate(); }
+      else if (this.bars && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { this.view.right += (e.key === 'ArrowLeft' ? -1 : 1) * Math.max(1, (this.L.pw / this.view.barW) * 0.1); this.clampView(); this.invalidate(); e.preventDefault(); }
+      else if (this.bars && (e.key === '+' || e.key === '=' || e.key === '-')) { this.view.barW = clamp(this.view.barW * (e.key === '-' ? 0.8 : 1.25), 1.2, 60); this.clampView(); this.invalidate(); }
     });
   }
   clampView() { const n = this.bars.t.length, vis = this.L.pw / this.view.barW; this.view.right = clamp(this.view.right, Math.min(n - 1, 5), n - 1 + vis * 0.8); }
@@ -644,7 +675,7 @@ export class Chart {
     if (!this.bars) return;
     const b = this.bars;
     this.lgO = h('span', { class: 'lg-ohlc' });
-    this.legend.append(h('div', { class: 'lg-title' }, h('b', null, b.symbol), h('span', { class: 'lg-tf' }, tfLabel(b.tf)), h('span', { class: 'lg-name' }, b.meta.name || ''), b.stale ? h('span', { class: 'lg-stale', title: 'The data provider did not answer; showing the last saved copy.' }, 'stale') : null), this.lgO);
+    this.legend.append(h('div', { class: 'lg-title' }, h('b', null, b.symbol), h('span', { class: 'lg-tf' }, tfLabel(b.tf)), h('span', { class: 'lg-name' }, b.meta.name || ''), b.adjusted ? h('span', { class: 'lg-adj', title: 'Prices include reinvested dividends' }, 'adj') : null, b.stale ? h('span', { class: 'lg-stale', title: 'The data provider did not answer; showing the last saved copy.' }, 'stale') : null), this.lgO);
     this.lgRows = [];
     const row = (ind) => {
       const vals = h('span', { class: 'lg-vals' });

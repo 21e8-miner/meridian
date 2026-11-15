@@ -24,7 +24,7 @@ async function draw() {
     h('label', { class: 'field' }, 'Symbol', h('input', { type: 'text', value: sym, style: { width: '96px', textTransform: 'uppercase' }, onchange: (e) => { sym = e.target.value.trim().toUpperCase(); draw(); } })),
     h('label', { class: 'field' }, 'Years', h('select', { onchange: (e) => { years = Number(e.target.value); draw(); } }, [10, 20, 30, 50].map((y) => h('option', { value: y, selected: y === years }, String(y)))))));
   let b;
-  try { b = await getBars(sym, '1d'); } catch (e) { box.append(h('div', { class: 'empty' }, `${sym}: ${e.message}`)); return; }
+  try { b = await getBars(sym, '1d', { adjusted: true }); } catch (e) { box.append(h('div', { class: 'empty' }, `${sym}: ${e.message}`)); return; }
   const n = b.t.length, byYM = new Map();
   for (let i = 1; i < n; i++) { const d = new Date(b.t[i] * 1000), k = d.getUTCFullYear() * 12 + d.getUTCMonth(); if (!byYM.has(k)) byYM.set(k, { first: b.c[i - 1], last: b.c[i] }); else byYM.get(k).last = b.c[i]; }
   const lastY = new Date(b.t[n - 1] * 1000).getUTCFullYear(), firstY = Math.max(new Date(b.t[0] * 1000).getUTCFullYear(), lastY - years + 1);
@@ -51,7 +51,7 @@ async function draw() {
   dtbl.append(h('tr', null, h('th', null, ''), days.map(([nm]) => h('th', null, nm))),
     h('tr', null, h('th', null, 'Average %'), days.map(([, a]) => h('td', { style: heat(avg(a), 0.25) }, fmtNum(avg(a), 3)))),
     h('tr', null, h('th', null, 'Up days'), days.map(([, a]) => h('td', null, `${Math.round((a.filter((v) => v > 0).length / a.length) * 100)}%`))));
-  box.append(h('p', { class: 'hint' }, `${b.meta.name || sym}. Month-over-month change in the closing price, ${firstY}–${lastY}. Prices are split-adjusted but exclude dividends. A dozen or two past years is a small sample: treat patterns here as weak evidence.`),
+  box.append(h('p', { class: 'hint' }, `${b.meta.name || sym}. Month-over-month change in the closing price, ${firstY}–${lastY}. ${b.adjusted ? 'Dividends are included.' : 'Price only: this series carries no dividend adjustment.'} A dozen or two past years is a small sample: treat patterns here as weak evidence.`),
     h('h4', null, 'By calendar month'), sum, h('h4', null, 'By day of the week'), dtbl, h('h4', null, 'Every month'), tbl,
     h('div', { class: 'row', style: { marginTop: '12px' } }, h('button', { onclick: () => api.openChart(sym, '1mo') }, 'Open monthly chart')));
 }

@@ -6,6 +6,7 @@ import { IND, calcIndicator, defaultParams, indLabel } from './ta.js';
 import { TF, tfLabel, alignToBase, tfsAtOrAbove } from './data.js';
 import { candlePatterns, CANDLES, CANDLE_BY_ID, autoSignals, AUTO_SIGNALS } from './auto.js';
 import { h, clear, store, modal } from './util.js';
+import { formatRuleset, parseRuleset } from './formula.js';
 
 export const OPS = [
   { id: 'gt', label: 'is above' }, { id: 'lt', label: 'is below' },
@@ -72,7 +73,13 @@ export function evalRuleset(rs, base, byTf) {
     const tf = condTf(c, base.tf), bars = tf === base.tf ? base : byTf && byTf.get ? byTf.get(tf) : null;
     if (!bars) { per.push(new Array(n).fill(false)); continue; }
     let m = evalCond(c, bars);
-    if (tf !== base.tf) { const al = alignToBase(base, bars, m.map((v) => (v ? 1 : 0))); m = al.map((v) => v > 0.5); }
+    if (tf !== base.tf) {
+      // src[i] = index of the higher-timeframe bar whose value base bar i can see
+      const src = alignToBase(base, bars, m.map((_, k) => k)), event = c.kind === 'cmp' && (c.op === 'xup' || c.op === 'xdn'), hm = m;
+      // A state ("above") holds for as long as that higher bar is the latest one. A cross is an
+      // event: it counts only on the base bar where it first becomes visible, not on every bar after.
+      m = src.map((k, i) => k === k && hm[k] && (!event || i === 0 || src[i - 1] !== k));
+    }
     per.push(m);
   }
   const mask = new Array(n).fill(false);
@@ -85,7 +92,7 @@ export function operandLabel(o) {
   let s;
   if (o.type === 'num') return String(o.value);
   if (o.type === 'price') s = PRICE[o.field] || 'Close';
-  else { const def = IND.get(o.id); if (!def) return `(missing ${o.id})`; s = indLabel(def, o.params); const vis = def.outputs.filter((q) => !q.hidden || q.k === o.out); if (vis.length > 1) { const q = def.outputs.find((x) => x.k === o.out); s += ' ' + (q ? q.label : o.out); } }
+  else { const def = IND.get(o.id); if (!def) return `(missing ${o.id})`; s = indLabel(def, o.params); const vis = def.outputs.filter((q) => !q.hidden || q.k === o.out); if (vis.length > 1) { const q = def.outputs.find((x) => x.k === o.out), l = q ? q.label : o.out; if (l !== (def.short || def.name)) s += ' ' + l; } }
   if (o.mult != null && o.mult !== '' && Number(o.mult) !== 1) s = `${o.mult} × ${s}`;
   if (o.offset) s += ` [${o.offset} ago]`;
   return s;
@@ -147,6 +154,7 @@ function operandEditor(o, isB, changed, adv) {
       const def = IND.get(o.id);
       if (def) {
         for (const p of def.params) {
+          if (p.hidden) continue;
           if (p.type === 'source' || p.type === 'select') {
             const opts = p.type === 'source' ? ['close', 'open', 'high', 'low', 'hl2', 'hlc3', 'ohlc4', 'volume'] : p.options;
             wrap.append(h('select', { title: p.label, onchange: (e) => { o.params[p.k] = e.target.value; changed(); } }, opts.map((v) => h('option', { value: v, selected: o.params[p.k] === v }, v))));
@@ -167,7 +175,12 @@ function operandEditor(o, isB, changed, adv) {
  */
 export function ruleBuilder(rs, { title = 'Conditions', baseTf = () => '1d', onChange = () => {}, allowAuto = true } = {}) {
   const root = h('div', { class: 'rb' }), advanced = new Set();
-  const changed = () => onChange(rs);
+  let tx = null, err = null;
+  const changed = () => { if (tx && document.activeElement !== tx) tx.value = formatRuleset(rs); if (err) err.textContent = ''; onChange(rs); };
+  const applyText = () => {
+    try { const r = parseRuleset(tx.value); rs.mode = r.mode; rs.conds = r.conds.filter((c) => allowAuto || c.kind !== 'auto'); draw(); onChange(rs); }
+    catch (e) { err.textContent = e.message; }
+  };
   const draw = () => {
     clear(root);
     const saved = savedRulesets();
@@ -177,7 +190,12 @@ export function ruleBuilder(rs, { title = 'Conditions', baseTf = () => '1d', onC
       h('select', { onchange: (e) => { rs.mode = e.target.value; changed(); } }, h('option', { value: 'all', selected: rs.mode !== 'any' }, 'Match ALL'), h('option', { value: 'any', selected: rs.mode === 'any' }, 'Match ANY')),
       load,
       h('button', { class: 'ghost', title: 'Save these conditions for reuse', onclick: async () => { const name = await ask('Save rule set', '', 'Name for this rule set'); if (name) { saveRuleset(name, rs); draw(); } } }, 'Save')));
-    if (!rs.conds.length) root.append(h('div', { class: 'rb-empty' }, 'No conditions yet.'));
+    tx = h('input', { type: 'text', class: 'rb-formula', value: formatRuleset(rs), spellcheck: 'false', autocomplete: 'off', placeholder: 'Type a rule and press Enter:  close > sma(200) and rsi(14) < 30 @1w',
+      title: 'The same rule as text. Edit it and press Enter. Examples: sma(50) crosses above sma(200) · volume > 1.5 * volume(20).avg · candle(hammer, 3) · close > sma(30) @1w',
+      onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); applyText(); } }, onchange: applyText });
+    err = h('div', { class: 'rb-err' });
+    root.append(tx, err);
+    if (!rs.conds.length) root.append(h('div', { class: 'rb-empty' }, 'No conditions yet. Type one above or add one below.'));
     const tfs = tfsAtOrAbove(baseTf());
     rs.conds.forEach((c, k) => {
       const tfSel = h('select', { class: 'tfsel', title: 'Timeframe this condition is evaluated on', onchange: (e) => { c.tf = e.target.value || null; changed(); } },

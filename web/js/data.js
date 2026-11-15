@@ -21,7 +21,27 @@ const derived = new WeakMap(); // base bars -> { tf: bars }
 const inflight = new Map();
 
 function wrap(d) {
-  return { symbol: d.symbol, tf: d.tf, t: d.t, o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, meta: d.meta || {}, stale: !!d.stale };
+  const b = { symbol: d.symbol, tf: d.tf, t: d.t, o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, meta: d.meta || {}, stale: !!d.stale };
+  if (d.a && d.a.length === d.c.length) b.a = d.a; // dividend-adjusted close (daily only)
+  return b;
+}
+
+/**
+ * Total-return view of daily bars: every price is scaled by adjustedClose / close, so dividends
+ * count as if reinvested. Bars without an adjusted column (intraday, crypto, indexes) come back
+ * unchanged. Higher timeframes must be aggregated from this, not adjusted after aggregation,
+ * because the factor changes inside a week or month at each ex-dividend date.
+ */
+const adjMemo = new WeakMap();
+export function adjust(bars) {
+  if (!bars.a) return bars;
+  let out = adjMemo.get(bars);
+  if (out) return out;
+  const n = bars.t.length, o = new Array(n), hh = new Array(n), l = new Array(n);
+  for (let i = 0; i < n; i++) { const f = bars.a[i] / bars.c[i]; o[i] = bars.o[i] * f; hh[i] = bars.h[i] * f; l[i] = bars.l[i] * f; }
+  out = { symbol: bars.symbol, tf: bars.tf, t: bars.t, o, h: hh, l, c: bars.a, v: bars.v, meta: bars.meta, stale: bars.stale, adjusted: true };
+  adjMemo.set(bars, out);
+  return out;
 }
 
 export function aggregate(base, tf) {
@@ -37,6 +57,7 @@ export function aggregate(base, tf) {
     }
   } else return base;
   const out = { symbol: base.symbol, tf, t: [], o: [], h: [], l: [], c: [], v: [], meta: base.meta, stale: base.stale };
+  if (base.adjusted) out.adjusted = true;
   let cur = null, j = -1;
   for (let i = 0; i < n; i++) {
     if (keys[i] !== cur) {
@@ -66,10 +87,11 @@ async function fetchJson(url) {
   return j;
 }
 
-export async function getBars(symbol, tf, { maxAge = 60000 } = {}) {
+export async function getBars(symbol, tf, { maxAge = 60000, adjusted = false } = {}) {
   symbol = symbol.toUpperCase();
   const base = TF[tf].base, key = symbol + '|' + base, hit = cache.get(key);
-  if (hit && Date.now() - hit.at < maxAge) return derive(hit.bars, tf);
+  const view = (b) => derive(adjusted ? adjust(b) : b, tf);
+  if (hit && Date.now() - hit.at < maxAge) return view(hit.bars);
   let p = inflight.get(key);
   if (!p) {
     p = fetchJson(`/api/bars?symbol=${encodeURIComponent(symbol)}&tf=${base}`)
@@ -77,7 +99,7 @@ export async function getBars(symbol, tf, { maxAge = 60000 } = {}) {
       .finally(() => inflight.delete(key));
     inflight.set(key, p);
   }
-  return derive(await p, tf);
+  return view(await p);
 }
 
 // Loads many symbols at one timeframe. Returns { bars: Map(symbol -> bars), errors }.
@@ -87,8 +109,13 @@ export async function getBatch(symbols, tf, { limit = 0, onProgress, maxAge = 60
   const base = TF[tf].base, out = new Map(), errors = {}, need = [], now = Date.now();
   for (const s of symbols) {
     const full = cache.get(s + '|' + base), tr = limit ? trimCache.get(s + '|' + base + '|' + limit) : null;
-    if (full && now - full.at < maxAge) out.set(s, derive(full.bars, tf));
-    else if (tr && now - tr.at < maxAge) out.set(s, derive(tr.bars, tf));
+    if (tr && now - tr.at < maxAge) out.set(s, derive(tr.bars, tf));
+    else if (full && now - full.at < maxAge) {
+      // cut the cached full history to the same length the server would send, so results do not depend on what else was opened
+      const b = limit ? sliceBars(full.bars, full.bars.t.length - limit) : full.bars;
+      if (limit) trimCache.set(s + '|' + base + '|' + limit, { at: full.at, bars: b });
+      out.set(s, derive(b, tf));
+    }
     else need.push(s);
   }
   const CH = 20;
@@ -141,7 +168,8 @@ export function alignToBase(base, htf, vals) {
 export function sliceBars(bars, from) {
   if (from <= 0) return bars;
   const out = { symbol: bars.symbol, tf: bars.tf, meta: bars.meta, stale: bars.stale };
-  for (const k of ['t', 'o', 'h', 'l', 'c', 'v']) out[k] = bars[k].slice(from);
+  if (bars.adjusted) out.adjusted = true;
+  for (const k of ['t', 'o', 'h', 'l', 'c', 'v', 'a']) if (bars[k]) out[k] = bars[k].slice(from);
   return out;
 }
 

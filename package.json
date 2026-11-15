@@ -1,1 +1,9 @@
-{"type":"module","name":"meridian","private":true}
+{
+  "name": "meridian",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "python3 server.py",
+    "test": "node tests/smoke.mjs && node tests/engine.mjs && node tests/formula.mjs && node tests/lab.mjs && python3 tests/test_server.py"
+  }
+}
