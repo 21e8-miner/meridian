@@ -1,6 +1,6 @@
 // Market scanner: multi-factor, multi-timeframe rules run across a symbol list.
 import { h, clear, store, toast, fmtPrice, fmtPct, fmtVol, fmtNum, downloadText, toCsv } from './util.js';
-import { TFS, TF, tfLabel, getBatch, UNIVERSES } from './data.js';
+import { TFS, TF, tfLabel, getBatch, universes } from './data.js';
 import { sma } from './ta.js';
 import { ruleBuilder, evalRuleset, requiredTfs, describeRuleset, operandLabel, leftValue, cmp, price, num, ind, newRuleset } from './conditions.js';
 import { api } from './api.js';
@@ -20,7 +20,8 @@ const PRESETS = {
 
 let cfg, resEl, statusEl, barEl, rows = [], sortK = 'chg', desc = true, cols = [];
 const persist = () => store.set('scan.cfg', cfg);
-const lists = () => ({ ...UNIVERSES, ...Object.fromEntries(Object.entries(api.watchlists()).map(([k, v]) => ['Watchlist: ' + k, v])) });
+let UNI = {};
+const lists = () => ({ ...UNI, ...Object.fromEntries(Object.entries(api.watchlists()).map(([k, v]) => ['Watchlist: ' + k, v])) });
 
 export function mount(el) {
   cfg = store.get('scan.cfg', null) || { tf: '1d', universe: 'Mega caps (30)', within: 1, rs: PRESETS['Uptrend on heavy volume']() };
@@ -41,6 +42,7 @@ export function mount(el) {
       h('div', { class: 'progress' }, barEl));
   };
   drawCfg();
+  universes().then((u) => { UNI = u; drawCfg(); });
   resEl.append(h('div', { class: 'empty' }, 'Run a scan to see matches.'));
 }
 

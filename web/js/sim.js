@@ -5,7 +5,7 @@ import { runBacktest, summarize } from './engine.js';
 
 // c.adjusted !== false: test on total-return prices (dividends reinvested) where the data has them.
 export async function prepare(symbol, c) {
-  const opt = { adjusted: c.adjusted !== false };
+  const opt = { adjusted: c.adjusted !== false, live: false }; // exchange bars only: no estimates in a backtest
   const base = await getBars(symbol, c.tf, opt), byTf = new Map([[c.tf, base]]);
   for (const tf of new Set([...requiredTfs(c.entry, c.tf), ...requiredTfs(c.exit, c.tf)])) if (!byTf.has(tf)) byTf.set(tf, await getBars(symbol, tf, opt));
   return { base, byTf };

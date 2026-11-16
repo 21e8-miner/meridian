@@ -24,7 +24,7 @@ async function draw() {
     h('label', { class: 'field' }, 'Symbol', h('input', { type: 'text', value: sym, style: { width: '96px', textTransform: 'uppercase' }, onchange: (e) => { sym = e.target.value.trim().toUpperCase(); draw(); } })),
     h('label', { class: 'field' }, 'Years', h('select', { onchange: (e) => { years = Number(e.target.value); draw(); } }, [10, 20, 30, 50].map((y) => h('option', { value: y, selected: y === years }, String(y)))))));
   let b;
-  try { b = await getBars(sym, '1d', { adjusted: true }); } catch (e) { box.append(h('div', { class: 'empty' }, `${sym}: ${e.message}`)); return; }
+  try { b = await getBars(sym, '1d', { adjusted: true, live: false }); } catch (e) { box.append(h('div', { class: 'empty' }, `${sym}: ${e.message}`)); return; }
   const n = b.t.length, byYM = new Map();
   for (let i = 1; i < n; i++) { const d = new Date(b.t[i] * 1000), k = d.getUTCFullYear() * 12 + d.getUTCMonth(); if (!byYM.has(k)) byYM.set(k, { first: b.c[i - 1], last: b.c[i] }); else byYM.get(k).last = b.c[i]; }
   const lastY = new Date(b.t[n - 1] * 1000).getUTCFullYear(), firstY = Math.max(new Date(b.t[0] * 1000).getUTCFullYear(), lastY - years + 1);

@@ -52,7 +52,7 @@ p.hint, .hint { color: var(--muted); font-size: 12px; margin: 2px 0 10px; }
 #nav button.on { color: var(--text); border-bottom-color: var(--accent); }
 .badge { background: var(--accent); color: var(--accent-ink); border-radius: 9px; padding: 0 6px; font-size: 11px; font-weight: 700; margin-left: 4px; }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-.status { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.status { color: var(--muted); font-size: 11px; white-space: nowrap; } .status.late { color: var(--accent); } .status.live { color: var(--up); }
 
 main { flex: 1; min-height: 0; position: relative; }
 .view { position: absolute; inset: 0; display: none; }
@@ -88,6 +88,8 @@ main { flex: 1; min-height: 0; position: relative; }
 .lg-title { display: inline-flex; gap: 7px; align-items: baseline; margin-right: 10px; }
 .lg-title b { font-size: 14px; } .lg-tf { color: var(--accent); font-weight: 600; } .lg-name { color: var(--muted); }
 .lg-adj { border: 1px solid var(--line); color: var(--muted); border-radius: 3px; padding: 0 5px; font-size: 10px; text-transform: uppercase; pointer-events: auto; }
+.lg-live { background: var(--accent); color: var(--accent-ink); border-radius: 3px; padding: 0 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; pointer-events: auto; }
+.lg-live.real { background: transparent; color: var(--up); border: 1px solid var(--up); }
 .lg-stale { background: var(--down); color: #fff; border-radius: 3px; padding: 0 5px; font-size: 10px; text-transform: uppercase; pointer-events: auto; }
 .lg-ohlc { color: var(--muted); white-space: nowrap; } .lg-ohlc i, .lg-vals i { font-style: normal; color: var(--text); }
 .lg-ohlc i.up { color: var(--up); } .lg-ohlc i.dn { color: var(--down); }
@@ -109,6 +111,7 @@ main { flex: 1; min-height: 0; position: relative; }
 .side-body { overflow: auto; padding: 0 0 6px; min-height: 0; }
 .wl-row { display: grid; grid-template-columns: 62px 1fr 70px 62px 16px; align-items: center; gap: 6px; padding: 4px 10px; cursor: pointer; }
 .wl-row:hover { background: var(--panel2); } .wl-row.cur { background: var(--panel2); box-shadow: inset 2px 0 0 var(--accent); }
+.wl-row .px.est::after, .wl-row .px.ext::after { content: '•'; margin-left: 3px; color: var(--accent); } .wl-row .px.ext::after { color: var(--up); }
 .wl-row .sym { font-weight: 600; } .wl-row .px, .wl-row .ch { text-align: right; }
 .wl-row svg { width: 100%; height: 18px; } .wl-row .x { visibility: hidden; color: var(--muted); border: 0; background: none; padding: 0; } .wl-row:hover .x { visibility: visible; }
 .an { padding: 0 10px 10px; }

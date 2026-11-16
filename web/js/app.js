@@ -1,6 +1,6 @@
 // App shell: navigation, chart panels, toolbar, drawing tools, watchlist, analysis panel.
-import { h, clear, store, bus, toast, modal, menu, uid, fmtPrice, fmtPct, fmtNum, fmtStamp, downloadText, parseWorkspace } from './util.js';
-import { TFS, TF, tfLabel, isIntraday, getBars, getBatch, searchSymbols, alignToBase, tfsAtOrAbove } from './data.js';
+import { h, clear, store, bus, toast, modal, menu, uid, fmtPrice, fmtPct, fmtNum, fmtStamp, fmtTime, downloadText, parseWorkspace } from './util.js';
+import { TFS, TF, tfLabel, isIntraday, getBars, getBatch, searchSymbols, alignToBase, tfsAtOrAbove, backend } from './data.js';
 import { IND, calcIndicator, defaultParams, indLabel, sma, rsi } from './ta.js';
 import { autoTrendlines, autoLevels, autoFib, detectCandles, chartPatterns, openGaps } from './auto.js';
 import { Chart } from './chart.js';
@@ -51,7 +51,7 @@ class Panel {
     const { symbol, tf } = this.cfg, token = ++this.token;
     if (!keepView) { this.chart.setBars(null); this.chart.setMessage(`Loading ${symbol}…`); }
     try {
-      const bars = await getBars(symbol, tf, { maxAge: keepView ? 45000 : 60000, adjusted: !!this.cfg.adj });
+      const bars = await getBars(symbol, tf, { maxAge: keepView ? (this.bars && this.bars.live ? 3000 : 10000) : 15000, adjusted: !!this.cfg.adj });
       if (token !== this.token) return;
       const fresh = this.bars !== bars;
       this.bars = bars;
@@ -60,7 +60,7 @@ class Panel {
       if (!keepView) { this.chart.setDrawings(loadDrawings(symbol)); this.chart.setTrades(this.tradesFor === symbol + '|' + tf ? this.trades : []); }
       this.chart.setAlertLines(alerts.priceLevels(symbol));
       if (fresh || !keepView) await this.compute();
-      $('data-status').textContent = `${bars.stale ? 'Stale data' : 'Delayed data'} · ${new Date().toLocaleTimeString()}`;
+      if (this.idx === state.active) updateStatus();
     } catch (e) {
       if (token !== this.token) return;
       if (!keepView) { this.bars = null; this.chart.setBars(null); this.chart.setMessage(`${symbol}: ${e.message}`); }
@@ -106,6 +106,46 @@ class Panel {
   }
 }
 
+// What the active chart is actually showing: when its newest bar is from, and how far behind the
+// feed's own clock runs. The provider's "last trade" time alone is not trusted: for futures it reads
+// ten minutes ago even when no bar of the session has been published yet.
+function wallNow(tz) { try { return Date.parse(new Date().toLocaleString('en-US', { timeZone: tz || 'America/New_York' }) + ' UTC') / 1000; } catch { return Date.now() / 1000; } }
+const span = (s) => (s < 90 ? `${Math.max(0, Math.round(s))} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days`);
+function feedStatus(b, nowUtc = Date.now() / 1000, nowWall = wallNow(b.meta.tz)) {
+  const n = b.t.length, intr = isIntraday(b.tf), lag = b.meta.asof ? nowUtc - b.meta.asof : NaN, barAge = nowWall - b.t[n - 1];
+  const parts = [b.symbol];
+  if (b.stale) parts.push('provider not answering');
+  if (b.live && b.live.kind === 'ext') {
+    // a stock outside regular hours: the newest value is a real extended-hours print or an estimate
+    const lv = b.live, d = new Date(nowWall * 1000), mins = d.getUTCHours() * 60 + d.getUTCMinutes(), wk = d.getUTCDay() % 6 !== 0;
+    const phase = !wk ? 'weekend' : mins >= 240 && mins < 570 ? 'pre-market' : mins >= 960 && mins < 1200 ? 'after hours' : 'overnight';
+    const chg = lv.base ? ` ${fmtPrice(lv.price)} (${fmtPct((lv.price / lv.base - 1) * 100)} vs close)` : '';
+    if (lv.isEst) { parts.push(`${phase} estimate via ${lv.src.split(':')[1]} perp (${span(Math.max(0, nowUtc - lv.asof))} ago)${chg}`); parts.push(`last exchange print ${span(lv.anchorAge)} ago`); }
+    else { parts.push(`${phase} · last print ${span(lv.anchorAge)} ago${chg}`); }
+    return { text: parts.join(' · '), late: false, live: true };
+  }
+  if (b.live) {
+    // the newest bars are projected from a live market; say so, and say how far the real data reaches
+    parts.push(`live estimate via ${b.live.src.split(':')[1]} (${span(Math.max(0, nowUtc - b.live.asof))} ago)`);
+    parts.push(`exchange data to ${fmtTime(b.live.anchor)}`);
+    if (b.live.anchorAge > 1800) parts.push(`rough: last exchange print ${span(b.live.anchorAge)} ago`);
+    return { text: parts.join(' · '), late: false, live: true };
+  }
+  if (!b.meta.open) parts.push('market closed');
+  if (b.meta.snapshot) parts.push(`shared snapshot ${span(Math.max(0, nowUtc - b.meta.snapshot))} old`);
+  parts.push(intr ? `latest bar ${fmtStamp(b.t[n - 1], true).replace(/^(\w+ \d+), \d+ /, '$1 ')} (${span(barAge)} ago)` : `latest bar ${fmtStamp(b.t[n - 1], false)}`);
+  if (b.meta.open && lag > 120) parts.push(`feed runs ${span(lag)} behind`);
+  // open market, yet the newest bar is far older than the feed's delay explains
+  const late = !!b.meta.open && intr && barAge > (lag > 0 ? lag : 0) + 3 * TF[b.tf].sec + 120;
+  return { text: parts.join(' · '), late, live: false };
+}
+function updateStatus() {
+  const el = $('data-status'), p = cur(), b = p && p.bars;
+  if (!b) { el.textContent = ''; el.classList.remove('late'); return; }
+  const st = feedStatus(b);
+  el.textContent = st.text; el.classList.toggle('late', st.late); el.classList.toggle('live', st.live);
+}
+
 function buildPanels() {
   const grid = $('chart-grid'), count = state.layout;
   for (const p of panels) { p.token++; p.chart.destroy(); }
@@ -122,7 +162,7 @@ function setActive(i, force) {
   if (i === state.active && !force) return;
   state.active = i;
   panels.forEach((p, k) => p.el.classList.toggle('active', k === i));
-  syncToolbar(); renderWatchlist(); renderAnalysis();
+  syncToolbar(); renderWatchlist(); renderAnalysis(); updateStatus();
   bus.emit('symbol', cur().cfg.symbol);
 }
 function setSymbol(sym, tf) {
@@ -273,7 +313,7 @@ function renderWatchlist() {
     const q = wl.quotes.get(s), up = q ? q.chg >= 0 : true;
     body.append(h('div', { class: 'wl-row' + (s === active ? ' cur' : ''), onclick: () => setSymbol(s) },
       h('span', { class: 'sym' }, s), h('span', { html: q ? spark(q.spark, q.spark[q.spark.length - 1] >= q.spark[0]) : '' }),
-      h('span', { class: 'px' }, q ? fmtPrice(q.last) : '…'), h('span', { class: 'ch ' + (up ? 'up' : 'dn') }, q ? fmtPct(q.chg) : ''),
+      h('span', { class: 'px' + (q && q.note ? (q.est ? ' est' : ' ext') : ''), title: q && q.note ? q.note : null }, q ? fmtPrice(q.last) : '…'), h('span', { class: 'ch ' + (up ? 'up' : 'dn') }, q ? fmtPct(q.chg) : ''),
       h('button', { class: 'x', title: 'Remove', onclick: (e) => { e.stopPropagation(); wl.lists[wl.cur] = syms.filter((x) => x !== s); saveWl(); renderWatchlist(); } }, '×')));
   }
   if (!syms.length) body.append(h('div', { class: 'hint', style: { padding: '8px 10px' } }, 'Empty list. Open a symbol and press +.'));
@@ -282,8 +322,14 @@ function renderWatchlist() {
 async function refreshQuotes() {
   const syms = wl.lists[wl.cur] || []; if (!syms.length) return;
   try {
-    const { bars } = await getBatch(syms, '1d', { limit: 30, maxAge: 55000 });
-    for (const [s, b] of bars) { const n = b.c.length; if (n < 2) continue; wl.quotes.set(s, { last: b.c[n - 1], chg: (b.c[n - 1] / b.c[n - 2] - 1) * 100, spark: b.c }); }
+    const { bars } = await getBatch(syms, '1d', { limit: 30, maxAge: 55000, live: true });
+    for (const [s, b] of bars) {
+      const n = b.c.length; if (n < 2) continue;
+      const lv = b.live, ext = lv && lv.kind === 'ext' && lv.price;
+      // outside regular hours a stock shows its latest extended print or estimate, against the close
+      wl.quotes.set(s, ext ? { last: lv.price, chg: (lv.price / b.c[n - 1] - 1) * 100, spark: [...b.c, lv.price], note: lv.isEst ? `Estimate via ${lv.src.split(':')[1]} perp; change is against the last close` : 'Latest extended-hours print; change is against the last close', est: !!lv.isEst }
+        : { last: b.c[n - 1], chg: (b.c[n - 1] / b.c[n - 2] - 1) * 100, spark: b.c, note: lv ? `Live estimate via ${lv.src.split(':')[1]}` : '', est: !!lv });
+    }
     renderWatchlist();
   } catch { /* keep the previous quotes */ }
 }
@@ -433,12 +479,25 @@ function init() {
     goto,
   });
 
+  backend().then((be) => { if (be.mode !== 'static') return; document.documentElement.dataset.mode = 'shared'; const ix = be.info(); $('symbol-input').title = `Shared page: ${ix.symbols.length} symbols with history, plus Hyperliquid's live markets (try XYZ100). Run Meridian locally to chart anything.`; });
   loadCustomIndicators(); loadModels();
   buildToolbar(); buildDrawTools(); initSearch(); buildPanels(); renderWatchlist(); refreshQuotes();
   alerts.start();
   bus.on('alerts', () => { for (const p of panels) p.chart.setAlertLines(alerts.priceLevels(p.cfg.symbol)); });
   bus.on('rulesets', () => renderAnalysis());
-  setInterval(() => { if (document.hidden) return; for (const p of panels) p.load({ keepView: true }); refreshQuotes(); }, 60000);
+  // Charts with a live estimate refresh every 5 s, other intraday charts of an open market every
+  // 15 s, everything else once a minute.
+  let beat = 0;
+  setInterval(() => {
+    updateStatus();
+    if (document.hidden) return;
+    beat++;
+    for (const p of panels) {
+      const b = p.bars, every = b && b.live ? 1 : b && b.meta.open && isIntraday(p.cfg.tf) ? 3 : 12;
+      if (beat % every === 0) p.load({ keepView: true });
+    }
+    if (beat % 12 === 0) refreshQuotes();
+  }, 5000);
   window.__meridian = { state, panels: () => panels, api };
 }
 init();

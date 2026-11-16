@@ -154,7 +154,7 @@ async function go() {
   if (cfg.features.length < 2) return toast('Pick at least two inputs.', 'err');
   clear(resEl); resEl.append(h('div', { class: 'empty' }, `Training on ${cfg.symbol}…`));
   try {
-    const bars = await getBars(cfg.symbol, cfg.tf);
+    const bars = await getBars(cfg.symbol, cfg.tf, { live: false });
     await new Promise((r) => setTimeout(r, 30));
     last = train(bars, { ...cfg, features: [...cfg.features] });
     report();

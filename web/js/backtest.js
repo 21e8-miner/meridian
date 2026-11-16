@@ -1,7 +1,7 @@
 // Strategy Tester: point-and-click entry/exit rules, risk settings, report, parameter sweeps,
 // multi-symbol runs.
 import { h, add, clear, store, toast, menu, modal, lineChart, downloadText, toCsv, fmtPct, fmtNum, fmtPrice, fmtStamp, fmtIso, fmtIsoTime } from './util.js';
-import { TFS, tfLabel, isIntraday, UNIVERSES } from './data.js';
+import { TFS, tfLabel, isIntraday, universes } from './data.js';
 import { IND, defaultParams } from './ta.js';
 import { ruleBuilder, describeRuleset, cmp, price, num, ind, newRuleset } from './conditions.js';
 import { prepare, simulate } from './sim.js';
@@ -174,9 +174,9 @@ async function runSweep(k, values) {
 }
 
 // ───────────────────────── multi-symbol ─────────────────────────
-function runList(e) {
+async function runList(e) {
   const r = e.currentTarget.getBoundingClientRect();
-  const lists = { ...Object.fromEntries(Object.entries(api.watchlists()).map(([k, v]) => ['Watchlist: ' + k, v])), ...UNIVERSES };
+  const lists = { ...Object.fromEntries(Object.entries(api.watchlists()).map(([k, v]) => ['Watchlist: ' + k, v])), ...(await universes()) };
   menu(r.left, r.top - 8 - 28 * Object.keys(lists).length, Object.entries(lists).map(([name, syms]) => ({ label: `${name}`, fn: () => runMany(name, syms) })));
 }
 async function runMany(name, syms) {

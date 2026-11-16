@@ -1,7 +1,7 @@
 // Canvas chart: price panes, indicator panes, automated overlays, user drawings, crosshair.
 // The chart is a view: the app computes indicators/analysis and hands them in.
 import { fmtPrice, fmtVol, fmtStamp, fmtNum, fmtPct, clamp, h, clear, MON, uid } from './util.js';
-import { isIntraday, tfLabel } from './data.js';
+import { isIntraday, tfLabel, liveStart, estimateTest } from './data.js';
 
 const AX = 66, TH = 22;
 const TWO_POINT = new Set(['trend', 'ray', 'rect', 'fib', 'measure']);
@@ -173,6 +173,7 @@ export class Chart {
     this.tticks = this.timeTicks(b, i0, i1);
     g.save(); g.beginPath(); g.rect(0, 0, pw, L.main.h); g.clip();
     this.drawGrid(i0, i1);
+    this.drawLiveBand(i0, i1);
     if (this.opt.vp) this.drawVP(b, i0, i1);
     this.drawAutoUnder(i0, i1);
     if (this.opt.volume) this.drawVolume(b, i0, i1);
@@ -209,6 +210,17 @@ export class Chart {
     g.stroke();
   }
 
+  // Bars the exchange has not published yet, filled in from a live market: shaded, so an estimate
+  // is never mistaken for an exchange print.
+  drawLiveBand() {
+    const k = liveStart(this.bars); if (k < 0) return;
+    const g = this.g, th = this.th, L = this.L, x = Math.round(this.xOf(k) - this.view.barW / 2) + 0.5;
+    if (x > L.pw) return;
+    g.fillStyle = rgba(th.accent, 0.07); g.fillRect(Math.max(0, x), 0, L.pw - Math.max(0, x), L.main.h);
+    g.save(); g.setLineDash([2, 3]); g.strokeStyle = rgba(th.accent, 0.8); g.beginPath(); g.moveTo(x, 0); g.lineTo(x, L.main.h); g.stroke(); g.restore();
+    if (x < L.pw - 70) { g.fillStyle = rgba(th.accent, 0.95); g.textAlign = 'left'; g.fillText(this.bars.live.kind === 'ext' ? 'outside regular hours' : 'live estimate', Math.max(4, x + 5), L.main.h - (this.opt.volume ? L.main.h * 0.16 + 10 : 10)); }
+  }
+
   drawPriceAxis(b) {
     const g = this.g, L = this.L, th = this.th, n = b.t.length;
     g.fillStyle = th.bg; g.fillRect(L.pw, 0, AX, this.h);
@@ -219,6 +231,16 @@ export class Chart {
     if (y > 0 && y < L.main.h) {
       g.save(); g.setLineDash([2, 3]); g.strokeStyle = col; g.globalAlpha = 0.7; g.beginPath(); g.moveTo(0, Math.round(y) + 0.5); g.lineTo(L.pw, Math.round(y) + 0.5); g.stroke(); g.restore();
       this.axisTag(y, fmtPrice(last), col, '#0b0e12');
+    }
+    // a stock's daily chart outside regular hours: the latest extended-hours print or estimate
+    const lv = this.bars.live;
+    if (lv && lv.from == null && lv.price) {
+      const iy = this.yOf(lv.price), c2 = lv.price >= (lv.base || last) ? th.up : th.down;
+      if (iy > 0 && iy < L.main.h) {
+        g.save(); g.setLineDash([1, 3]); g.strokeStyle = c2; g.beginPath(); g.moveTo(0, Math.round(iy) + 0.5); g.lineTo(L.pw, Math.round(iy) + 0.5); g.stroke(); g.restore();
+        g.fillStyle = c2; g.textAlign = 'right'; g.fillText(lv.isEst ? 'estimate now' : 'latest print', L.pw - 6, iy + (iy > y ? 9 : -9)); g.textAlign = 'left';
+        this.axisTag(iy, fmtPrice(lv.price), c2, '#0b0e12');
+      }
     }
     for (const a of this.alertLines) {
       const ay = this.yOf(a.price); if (!(ay > 0 && ay < L.main.h)) continue;
@@ -270,12 +292,15 @@ export class Chart {
       if (type === 'area') { g.lineTo(this.xOf(i1), this.L.main.h); g.lineTo(this.xOf(i0), this.L.main.h); g.closePath(); g.fillStyle = rgba(th.accent, 0.1); g.fill(); }
       g.lineWidth = 1; return;
     }
-    const bw = Math.max(1, Math.floor(bwRaw * 0.7)), half = bw / 2;
-    for (let pass = 0; pass < 2; pass++) {
-      const upPass = pass === 0, col = upPass ? th.up : th.down;
+    const bw = Math.max(1, Math.floor(bwRaw * 0.7)), half = bw / 2, isEst = estimateTest(this.bars);
+    // exchange bars at full strength, then estimated bars faded
+    for (let pass = 0; pass < (isEst ? 4 : 2); pass++) {
+      const upPass = pass % 2 === 0, col = upPass ? th.up : th.down, estPass = pass >= 2;
+      g.globalAlpha = estPass ? 0.42 : 1;
       g.fillStyle = col; g.strokeStyle = col; g.lineWidth = 1; g.beginPath();
       for (let i = i0; i <= i1; i++) {
         const up = b.c[i] >= b.o[i]; if (up !== upPass) continue;
+        if (isEst && isEst(i) !== estPass) continue;
         const x = Math.round(this.xOf(i)) + 0.5, yo = this.yOf(b.o[i]), yc = this.yOf(b.c[i]), yh = this.yOf(b.h[i]), yl = this.yOf(b.l[i]);
         if (type === 'bars') {
           g.moveTo(x, yh); g.lineTo(x, yl);
@@ -294,6 +319,7 @@ export class Chart {
       }
       g.stroke();
     }
+    g.globalAlpha = 1;
   }
 
   drawInd(ind, i0, i1, Y, pane, b) {
@@ -675,7 +701,12 @@ export class Chart {
     if (!this.bars) return;
     const b = this.bars;
     this.lgO = h('span', { class: 'lg-ohlc' });
-    this.legend.append(h('div', { class: 'lg-title' }, h('b', null, b.symbol), h('span', { class: 'lg-tf' }, tfLabel(b.tf)), h('span', { class: 'lg-name' }, b.meta.name || ''), b.adjusted ? h('span', { class: 'lg-adj', title: 'Prices include reinvested dividends' }, 'adj') : null, b.stale ? h('span', { class: 'lg-stale', title: 'The data provider did not answer; showing the last saved copy.' }, 'stale') : null), this.lgO);
+    this.legend.append(h('div', { class: 'lg-title' }, h('b', null, b.symbol), h('span', { class: 'lg-tf' }, tfLabel(b.tf)), h('span', { class: 'lg-name' }, b.meta.name || ''), b.adjusted ? h('span', { class: 'lg-adj', title: 'Prices include reinvested dividends' }, 'adj') : null,
+      b.live ? h('span', { class: 'lg-live' + (b.live.isEst ? '' : ' real'), title: b.live.kind === 'ext'
+        ? `Outside regular hours. Solid bars are the exchange's own pre-market and after-hours prints.${b.live.src ? ` Faded bars are stretches with no prints, projected from ${b.live.src.split(':')[1]} on Hyperliquid and scaled to the last real print.` : ''}`
+        : `The exchange's free data is delayed. The faded bars are projected from ${b.live.src.split(':')[1]} on Hyperliquid, a market that trades this around the clock, scaled to the last exchange print. They are estimates and are replaced as exchange bars arrive.` },
+      b.live.isEst ? 'live est' : 'ext hours') : null,
+      b.stale ? h('span', { class: 'lg-stale', title: 'The data provider did not answer; showing the last saved copy.' }, 'stale') : null), this.lgO);
     this.lgRows = [];
     const row = (ind) => {
       const vals = h('span', { class: 'lg-vals' });

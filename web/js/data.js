@@ -2,6 +2,7 @@
 import { dayKey, weekKey, monthKey } from './ta.js';
 
 export const TFS = [
+  { id: '1m', label: '1m', sec: 60, base: '1m' },
   { id: '5m', label: '5m', sec: 300, base: '5m' },
   { id: '15m', label: '15m', sec: 900, base: '15m' },
   { id: '30m', label: '30m', sec: 1800, base: '30m' },
@@ -14,6 +15,21 @@ export const TFS = [
 export const TF = Object.fromEntries(TFS.map((t, i) => [t.id, { ...t, rank: i }]));
 export const isIntraday = (tf) => TF[tf].sec < 86400;
 export const tfLabel = (tf) => (TF[tf] ? TF[tf].label : tf);
+// Index of the first bar that is (wholly or partly) a live estimate, or -1.
+export function liveStart(bars) {
+  if (!bars || !bars.live || bars.live.from == null) return -1;
+  const sec = TF[bars.tf].sec, n = bars.t.length;
+  for (let i = Math.max(0, n - 3000); i < n; i++) if (bars.t[i] + sec > bars.live.from) return i;
+  return -1;
+}
+// Is bar i made only of estimates? (bars.live.est lists [first, last] start times of such runs)
+export function estimateTest(bars) {
+  const runs = bars && bars.live && bars.live.est;
+  if (!runs || !runs.length) return null;
+  const sec = TF[bars.tf].sec, base = TF[TF[bars.tf].base].sec;
+  // a derived bar (4h from 1h) is an estimate only if it lies wholly inside one run
+  return (i) => { const a = bars.t[i], z = a + sec - base; for (const r of runs) if (a >= r[0] && z <= r[1]) return true; return false; };
+}
 export const tfsAtOrAbove = (tf) => TFS.filter((t) => TF[t.id].rank >= TF[tf].rank);
 
 const cache = new Map(); // "SYM|tf" -> { at, bars } for base timeframes
@@ -23,6 +39,7 @@ const inflight = new Map();
 function wrap(d) {
   const b = { symbol: d.symbol, tf: d.tf, t: d.t, o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, meta: d.meta || {}, stale: !!d.stale };
   if (d.a && d.a.length === d.c.length) b.a = d.a; // dividend-adjusted close (daily only)
+  if (d.live) b.live = d.live; // newest bars are a live estimate: { src, from, partial, anchor, anchorAge, asof }
   return b;
 }
 
@@ -40,6 +57,7 @@ export function adjust(bars) {
   const n = bars.t.length, o = new Array(n), hh = new Array(n), l = new Array(n);
   for (let i = 0; i < n; i++) { const f = bars.a[i] / bars.c[i]; o[i] = bars.o[i] * f; hh[i] = bars.h[i] * f; l[i] = bars.l[i] * f; }
   out = { symbol: bars.symbol, tf: bars.tf, t: bars.t, o, h: hh, l, c: bars.a, v: bars.v, meta: bars.meta, stale: bars.stale, adjusted: true };
+  if (bars.live) out.live = bars.live;
   adjMemo.set(bars, out);
   return out;
 }
@@ -58,6 +76,7 @@ export function aggregate(base, tf) {
   } else return base;
   const out = { symbol: base.symbol, tf, t: [], o: [], h: [], l: [], c: [], v: [], meta: base.meta, stale: base.stale };
   if (base.adjusted) out.adjusted = true;
+  if (base.live) out.live = base.live;
   let cur = null, j = -1;
   for (let i = 0; i < n; i++) {
     if (keys[i] !== cur) {
@@ -80,6 +99,38 @@ function derive(base, tf) {
   return d[tf];
 }
 
+// ── where prices come from ──
+// With a Meridian server running (local use) every request goes to it. Without one (the shared
+// static site) the page reads a published snapshot and brings it up to date itself: see static.js.
+const serverBackend = {
+  mode: 'server',
+  bars: (symbol, tf, live) => fetchJson(`/api/bars?symbol=${encodeURIComponent(symbol)}&tf=${tf}${live ? '' : '&live=0'}`),
+  batch: (symbols, tf, limit, live) => fetchJson(`/api/batch?symbols=${encodeURIComponent(symbols.join(','))}&tf=${tf}&limit=${limit}${live ? '&live=1' : ''}`),
+  search: async (q) => (await fetchJson('/api/search?q=' + encodeURIComponent(q))).results || [],
+  info: () => null,
+};
+let backendPromise = null;
+export function backend() {
+  if (!backendPromise) backendPromise = (async () => {
+    try { const r = await fetch('api/health', { cache: 'no-store' }); if (r.ok && (await r.json()).ok) return serverBackend; } catch { /* no server here */ }
+    const st = await import('./static.js'); await st.init(); return st;
+  })();
+  return backendPromise;
+}
+// The symbol lists scans and multi-symbol tests can use: fixed lists locally, the snapshot's own
+// symbols on the shared site (nothing else has data there).
+export async function universes() {
+  const be = await backend(), ix = be.info();
+  if (!ix) return UNIVERSES;
+  const all = ix.symbols, pick = (f) => all.filter(f).map((s) => s.symbol);
+  return {
+    [`Shared data set (${all.length})`]: all.map((s) => s.symbol),
+    [`Stocks (${pick((s) => s.type === 'EQUITY').length})`]: pick((s) => s.type === 'EQUITY'),
+    [`ETFs (${pick((s) => s.type === 'ETF').length})`]: pick((s) => s.type === 'ETF'),
+    [`Futures (${pick((s) => s.type === 'FUTURE').length})`]: pick((s) => s.type === 'FUTURE'),
+  };
+}
+
 async function fetchJson(url) {
   const r = await fetch(url);
   const j = await r.json().catch(() => ({ error: 'bad response' }));
@@ -87,14 +138,17 @@ async function fetchJson(url) {
   return j;
 }
 
-export async function getBars(symbol, tf, { maxAge = 60000, adjusted = false } = {}) {
+// live: true (default) asks for the freshest view - delayed futures filled in, stocks continued
+// past the close with extended-hours prints and estimates. live: false is exchange bars only, for
+// backtests and model training.
+export async function getBars(symbol, tf, { maxAge = 60000, adjusted = false, live = true } = {}) {
   symbol = symbol.toUpperCase();
-  const base = TF[tf].base, key = symbol + '|' + base, hit = cache.get(key);
+  const base = TF[tf].base, key = symbol + '|' + base + (live ? '' : '|x'), hit = cache.get(key);
   const view = (b) => derive(adjusted ? adjust(b) : b, tf);
   if (hit && Date.now() - hit.at < maxAge) return view(hit.bars);
   let p = inflight.get(key);
   if (!p) {
-    p = fetchJson(`/api/bars?symbol=${encodeURIComponent(symbol)}&tf=${base}`)
+    p = backend().then((be) => be.bars(symbol, base, live))
       .then((d) => { const bars = wrap(d); cache.set(key, { at: Date.now(), bars }); return bars; })
       .finally(() => inflight.delete(key));
     inflight.set(key, p);
@@ -105,15 +159,15 @@ export async function getBars(symbol, tf, { maxAge = 60000, adjusted = false } =
 // Loads many symbols at one timeframe. Returns { bars: Map(symbol -> bars), errors }.
 // With `limit` only the most recent bars are sent; those copies are cached apart from full history.
 const trimCache = new Map();
-export async function getBatch(symbols, tf, { limit = 0, onProgress, maxAge = 60000 } = {}) {
-  const base = TF[tf].base, out = new Map(), errors = {}, need = [], now = Date.now();
+export async function getBatch(symbols, tf, { limit = 0, onProgress, maxAge = 60000, live = false } = {}) {
+  const base = TF[tf].base, out = new Map(), errors = {}, need = [], now = Date.now(), lk = live ? '|live' : '';
   for (const s of symbols) {
-    const full = cache.get(s + '|' + base), tr = limit ? trimCache.get(s + '|' + base + '|' + limit) : null;
+    const full = cache.get(s + '|' + base + (live ? '' : '|x')), tr = limit ? trimCache.get(s + '|' + base + '|' + limit + lk) : null;
     if (tr && now - tr.at < maxAge) out.set(s, derive(tr.bars, tf));
     else if (full && now - full.at < maxAge) {
       // cut the cached full history to the same length the server would send, so results do not depend on what else was opened
       const b = limit ? sliceBars(full.bars, full.bars.t.length - limit) : full.bars;
-      if (limit) trimCache.set(s + '|' + base + '|' + limit, { at: full.at, bars: b });
+      if (limit) trimCache.set(s + '|' + base + '|' + limit + lk, { at: full.at, bars: b });
       out.set(s, derive(b, tf));
     }
     else need.push(s);
@@ -124,10 +178,10 @@ export async function getBatch(symbols, tf, { limit = 0, onProgress, maxAge = 60
   for (let i = 0; i < need.length; i += CH) {
     const chunk = need.slice(i, i + CH);
     try {
-      const j = await fetchJson(`/api/batch?symbols=${encodeURIComponent(chunk.join(','))}&tf=${base}&limit=${limit}`);
+      const j = await (await backend()).batch(chunk, base, limit, live);
       for (const [s, d] of Object.entries(j.bars)) {
         const bars = wrap(d);
-        if (limit) trimCache.set(s + '|' + base + '|' + limit, { at: Date.now(), bars }); else cache.set(s + '|' + base, { at: Date.now(), bars });
+        if (limit) trimCache.set(s + '|' + base + '|' + limit + lk, { at: Date.now(), bars }); else cache.set(s + '|' + base + (live ? '' : '|x'), { at: Date.now(), bars });
         out.set(s, derive(bars, tf));
       }
       Object.assign(errors, j.errors || {});
@@ -138,10 +192,7 @@ export async function getBatch(symbols, tf, { limit = 0, onProgress, maxAge = 60
   return { bars: out, errors };
 }
 
-export async function searchSymbols(q) {
-  const j = await fetchJson('/api/search?q=' + encodeURIComponent(q));
-  return j.results || [];
-}
+export async function searchSymbols(q) { return (await backend()).search(q); }
 
 /**
  * Map a series computed on a higher timeframe onto base bars without lookahead.
@@ -169,6 +220,7 @@ export function sliceBars(bars, from) {
   if (from <= 0) return bars;
   const out = { symbol: bars.symbol, tf: bars.tf, meta: bars.meta, stale: bars.stale };
   if (bars.adjusted) out.adjusted = true;
+  if (bars.live) out.live = bars.live;
   for (const k of ['t', 'o', 'h', 'l', 'c', 'v', 'a']) if (bars[k]) out[k] = bars[k].slice(from);
   return out;
 }
