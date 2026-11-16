@@ -1,13 +1,18 @@
 # Publishes the shared site: web/ plus a fresh snapshot of exchange history (tools/snapshot.py).
 # The page keeps itself current between runs by projecting from Hyperliquid in the browser.
+#
+# How often it runs: GitHub starts scheduled runs late, or not at all, when it is busy (on this
+# repository the ten-minute schedule did not fire once in its first hours). So each run books the
+# next one itself (the `again` job) and the schedule is only there to restart that chain if it ever
+# stops. To stop publishing, disable this workflow, or cancel the run that is in progress.
 name: Publish shared site
 
 on:
   push:
     branches: [main]
   schedule:
-    # every ten minutes, off the top of the hour, when the scheduler is busiest and drops runs
-    - cron: "7,17,27,37,47,57 * * * *"
+    # off the top of the hour, when the scheduler is busiest
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -16,14 +21,14 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # one build at a time, in order: each one starts from the build before it
+    concurrency:
+      group: pages-build
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,16 +37,17 @@ jobs:
       # Most of the wider symbol list is not refetched on a given build but carried over from the
       # last one. That build is downloaded here as it was uploaded (not read back from the public
       # site, which would spend the site's bandwidth allowance on its own upkeep).
-      - name: Fetch the last published build
+      - name: Fetch the last build
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow pages.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-          [ -n "$id" ] || { echo "no earlier successful build"; exit 0; }
-          gh run download "$id" --repo "$GITHUB_REPOSITORY" --name github-pages --dir prev_artifact
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=github-pages&per_page=20" \
+            --jq "[.artifacts[] | select(.expired | not) | select(.workflow_run.id != $GITHUB_RUN_ID)] | sort_by(.created_at) | reverse | .[0].workflow_run.id // empty")
+          [ -n "$run" ] || { echo "no earlier build to start from"; exit 0; }
+          echo "starting from the build of run $run"
+          gh run download "$run" --repo "$GITHUB_REPOSITORY" --name github-pages --dir prev_artifact
           mkdir -p prev && tar -xf prev_artifact/artifact.tar -C prev && rm -rf prev_artifact
-          ls prev/data | head -20
       - name: Build site and snapshot
         # --site is the fallback when there is no local copy of the last build (it expires after a day)
         run: python tools/snapshot.py _site --prev=prev --site="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
@@ -53,9 +59,35 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Books the next run: about ten minutes on while US stocks are printing (weekdays 04:00-20:00
+  # New York), half an hour on otherwise. It runs whether or not this build succeeded, and does
+  # nothing if another run is already under way, so pushes and scheduled runs never multiply it.
+  again:
+    needs: deploy
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: write
+    steps:
+      - name: Wait, then start the next build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          hour=$(TZ=America/New_York date +%-H); day=$(TZ=America/New_York date +%u)
+          if [ "$day" -le 5 ] && [ "$hour" -ge 4 ] && [ "$hour" -lt 20 ]; then wait=450; else wait=1680; fi
+          echo "next build in $wait s"; sleep "$wait"
+          others=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow pages.yml --limit 30 --json databaseId,status \
+            --jq "[.[] | select(.status != \"completed\" and .databaseId != $GITHUB_RUN_ID)] | length")
+          if [ "$others" != "0" ]; then echo "another run is already under way: leaving the next build to it"; exit 0; fi
+          gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"

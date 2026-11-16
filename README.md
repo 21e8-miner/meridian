@@ -131,8 +131,11 @@ only. Backtests, the model lab and seasonality always read exchange bars only.
 ## The shared page
 
 `tools/snapshot.py` builds a static copy of the app: `web/` plus recent exchange history. A GitHub
-Actions job (`.github/workflows/pages.yml`) rebuilds and publishes it on a ten-minute schedule
-(GitHub runs schedules late when it is busy, so expect ten to thirty minutes between builds). A
+Actions job (`.github/workflows/pages.yml`) rebuilds and publishes it about every ten minutes
+while US stocks are printing (weekdays 04:00–20:00 New York) and every half hour otherwise.
+GitHub's own scheduler starts runs late or not at all when it is busy, so each run books the next
+one itself and the schedule only restarts that chain if it stops; disabling the workflow stops
+it. A
 static page cannot fetch the exchange feed itself, so between builds the page keeps itself current
 in the browser: it reads Hyperliquid directly and applies the same projection as the server
 (`web/js/static.js`, a port of the server code that `tests/parity.mjs` checks against it on 6,300
