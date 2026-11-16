@@ -230,25 +230,37 @@ export async function proxyMinutes(coin, startS) {
 }
 
 // ── the snapshot ──
-let index = null, indexAt = 0, hlNames = null;
+// data/stamp.json is tiny and says when the snapshot was built and which symbol list goes with it;
+// the list itself (data/catalog.json) is fetched again only when that changes.
+let index = null, indexAt = 0, catalogId = null, hlNames = null;
 const files = new Map(); // "tf|SYM" -> { g, data }
+async function getJson(url, opts) { const r = await fetch(url, opts); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
 async function loadIndex(force = false) {
   if (index && !force && Date.now() - indexAt < 60000) return index;
   try {
-    const r = await fetch(`data/index.json?m=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    index = await r.json(); indexAt = Date.now();
+    const st = await getJson(`data/stamp.json?m=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
+    if (!index || st.catalog !== catalogId) {
+      const cat = await getJson(`data/catalog.json?c=${st.catalog}`);
+      cat.by = new Map(cat.symbols.map((s) => [s.symbol, s]));
+      index = cat; catalogId = st.catalog;
+    }
+    index.generated = st.generated; indexAt = Date.now();
   } catch (e) { if (!index) throw new Error('the shared data set could not be loaded (' + e.message + ')'); }
   return index;
 }
+const SHORT = 'has daily and hourly history on the shared page; shorter timeframes are kept for the core symbols';
 async function loadFile(tf, symbol) {
-  const ix = await loadIndex(), key = tf + '|' + symbol, hit = files.get(key);
-  if (hit && hit.g === ix.generated) return hit.data;
-  const r = await fetch(`data/${tf}/${ix.file[symbol]}.json?g=${ix.generated}`);
-  if (!r.ok) throw new Error(`${symbol}: no ${tf} data in the shared set`);
-  const data = await r.json();
-  files.set(key, { g: ix.generated, data });
-  return data;
+  const ix = await loadIndex(), key = tf + '|' + symbol, hit = files.get(key), e = ix.by.get(symbol);
+  if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} ${SHORT}` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
+  if (hit && hit.g === ix.generated) return hit.p || hit.data;
+  // core files change with every build; the rest change a few times an hour at most, so they are
+  // left to the browser's own cache (the site serves them as fresh for ten minutes)
+  const g = ix.generated; // the build this request belongs to: the index object is updated in place
+  const p = fetch(`data/${tf}/${ix.file[symbol]}.json${e.tier === 2 ? '' : `?g=${g}`}`).then((r) => { if (!r.ok) throw new Error(`${symbol}: no ${tf} data in the shared set`); return r.json(); });
+  files.set(key, { g, p }); // callers that arrive while it loads share the one request
+  const mine = () => { const cur = files.get(key); return cur && cur.p === p; }; // not replaced by a newer build's request
+  try { const data = await p; if (mine()) files.set(key, { g, data }); return data; }
+  catch (err) { if (mine()) files.delete(key); throw err; }
 }
 const EMPTY = { t: [], o: [], h: [], l: [], c: [], v: [] };
 
@@ -271,6 +283,7 @@ async function addLive(data, ix) {
     if (stock) {
       // outside regular hours: the snapshot's extended-hours prints, then estimates where it has a proxy
       let ext = EMPTY, proxy = [];
+      if (!coin && !(ix.by.get(symbol) || { tfs: [] }).tfs.includes('x1m')) return data; // no extended prints kept and nothing to project from
       try { ext = await loadFile('x1m', symbol); } catch { /* none in the snapshot */ }
       const start = toUtc(data.t[data.t.length - 1] + (tf === '1d' ? 16 * 3600 : SEC[tf])) - 300;
       if (coin && now - start <= MAX_PROXY_MINUTES * 60) { try { proxy = await proxyMinutes(coin, start); } catch (e) { console.warn(`proxy unavailable for ${symbol}:`, e.message); } }
@@ -294,12 +307,29 @@ export async function bars(symbol, tf, live = true) {
     return d;
   }
   const ix = await loadIndex();
-  if (!ix.file[symbol]) throw new Error(`not in the shared data set (${ix.symbols.length} symbols). Live markets work too: try XYZ100. Run Meridian locally for any symbol.`);
+  if (!ix.by.has(symbol)) throw new Error(`not in the shared data set (${ix.symbols.length} symbols). Live markets work too: try XYZ100. Run Meridian locally for any symbol.`);
   const src = tf === '15m' || tf === '30m' ? '5m' : tf;
   let data = await loadFile(src, symbol);
+  const fetched = data.fetched || ix.generated; // when this series was read from the exchange feed
   if (src !== tf) data = regroup(data, tf);
   const out = live ? await addLive(data, ix) : data;
-  return { ...out, meta: { ...out.meta, open: sessionOpen(symbol, now), snapshot: ix.generated } };
+  return { ...out, meta: { ...out.meta, open: sessionOpen(symbol, now), snapshot: fetched } };
+}
+
+// Which stored timeframes a symbol has here (null = any: a live market).
+export function tfs(symbol) {
+  if (hlCoin(symbol) || !index) return null;
+  const e = index.by.get(symbol.toUpperCase());
+  return e ? e.tfs : [];
+}
+
+// A year of daily closes for every symbol in one file, for the Markets view.
+let packAt = null;
+export async function pack() {
+  const ix = await loadIndex();
+  const g = ix.generated;
+  if (!packAt || packAt.g !== g) packAt = { g, data: await getJson(`data/pack.json?g=${g}`) };
+  return packAt.data;
 }
 
 export async function batch(symbols, tf, limit = 0, live = false) {
@@ -314,7 +344,7 @@ export async function batch(symbols, tf, limit = 0, live = false) {
       } catch (e) { out.errors[s] = e.message; }
     }
   };
-  await Promise.all(Array.from({ length: 6 }, worker));
+  await Promise.all(Array.from({ length: 12 }, worker));
   return out;
 }
 

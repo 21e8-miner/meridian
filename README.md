@@ -1,12 +1,13 @@
 # Meridian
 
-A local market-analysis workstation: charting with automated technical analysis, a multi-timeframe
-scanner, a strategy tester, alerts and paper bots, a JavaScript indicator studio, a small model lab
-and seasonality tables. One Python file serves it; the front end is plain ES modules with no build
+A local market-analysis workstation: charting with automated technical analysis, a market heat map,
+a multi-timeframe scanner, a strategy tester, alerts and paper bots, a JavaScript indicator studio,
+a small model lab and seasonality tables. One Python file serves it; the front end is plain ES modules with no build
 step and no dependencies.
 
 **Shared page:** https://21e8-miner.github.io/meridian/ — runs in the browser with no install, on
-90 symbols plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
+about 610 symbols (the S&P 500 and other followed stocks, ETFs, futures, indexes, currencies,
+crypto) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
 
 ## Run
 
@@ -26,14 +27,16 @@ npm test
 | `tests/engine.mjs` | fills, fees, slippage, sizing, stops, targets, trailing and time exits, short side, rule evaluation, multi-timeframe rules, yearly table, parameter sweep, statistics |
 | `tests/formula.mjs` | rules as text: round trips, alternate spellings, error messages |
 | `tests/lab.mjs` | model lab: split, embargo, no output on training bars |
-| `tests/parity.mjs` | the browser port of the live fill gives the same results as `server.py` (cases written by `tests/make_parity.py`) |
-| `tests/test_server.py` | provider parsing: null rows, stub bars, wall-clock times, duplicate sessions, adjusted closes; market sessions; the live fill (projection maths, agreement across timeframes, market hours) |
+| `tests/markets.mjs` | Markets view: period changes by calendar (holidays, month ends, year to date), breadth, treemap layout (areas, bounds, no overlap), tile colors |
+| `tests/parity.mjs` | the browser port of the live fill and of the market summary rows gives the same results as the Python (cases written by `tests/make_parity.py`) |
+| `tests/test_server.py` | provider parsing: null rows, stub bars, wall-clock times, duplicate sessions, adjusted closes; market sessions; the live fill (projection maths, agreement across timeframes, market hours); the shared-site build (which series are due, across closes, weekends, holidays and a clock change) |
 
 ## What is in it
 
 | Area | What it does |
 | --- | --- |
 | **Charts** | Candles, hollow, Heikin-Ashi, OHLC bars, line, area. 1m to monthly; intraday charts of an open market refresh every 15 seconds. Log scale, volume, volume-by-price. 1, 2 or 4 charts side by side. 66 built-in indicators, each of which can be computed on a higher timeframe and overlaid. Right-click a bar to anchor a VWAP there. Optional dividend-adjusted prices. Drawing tools: trendline, ray, horizontal line, rectangle, Fibonacci, note, measure; points snap to the nearest open/high/low/close (hold Alt for free placement). Drawings are saved per symbol. Crosshairs are linked across charts; drag the price axis to zoom it, arrow keys pan. |
+| **Markets** | A whole list at once: heat map grouped by sector (color = change over 1 day to 1 year, area = dollar volume or equal), advancers and decliners, share above the 50- and 200-day averages, 52-week closing highs and lows, a table per sector, strongest and weakest. Click a tile to open its chart, a sector to zoom into it. |
 | **Auto analysis** | Trendlines through swing pivots (with touch counts and break detection), support / resistance zones, Fibonacci retracement of the dominant swing, 20 candlestick patterns, chart patterns (double top / bottom, head & shoulders, triangles, wedges, channels, rectangle), open gaps. A side panel lists what was found plus a multi-timeframe trend table. |
 | **Scanner** | Conditions built by pointing and clicking or typed as text (`close > sma(200) and rsi(14) < 30 @1w`): indicator vs indicator or value, crosses, candlestick patterns, auto-analysis signals, each on its own timeframe. Built-in lists or any watchlist. Ten presets. Results save to a watchlist or CSV. |
 | **Strategy Tester** | Entry and exit rules from the same builder, long or short, stop / target / trailing stop / time exit, fees and slippage. Report with equity vs buy & hold, drawdown, a year-by-year table, trade list (CSV export), trades drawn on the chart. Dividends included by default. **Sweep a setting** runs a range of values for any number in the strategy and shows in-sample next to out-of-sample. Runs one symbol or a whole list. |
@@ -42,6 +45,8 @@ npm test
 | **Model Lab** | Logistic regression or boosted stumps predicting "up more than X% in N bars" from indicator inputs. Fitted on the first 70% of history, scored on the last 30% with an embargo between them. A saved model becomes an indicator. |
 | **Seasonality** | Month-by-year return grid, per-month averages and hit rates, day-of-week returns. |
 | **Checklists** | Any saved rule set can be checked condition by condition against the chart you are looking at. |
+| **Links** | The address names what is on screen (`#/chart/NQ=F/5m`, `#/markets`); the 🔗 button copies it. Layouts, drawings and indicators stay in each browser. |
+| **Touch** | On a phone or tablet one finger pans, draws and moves the crosshair; two fingers pinch to zoom. |
 | **Backup** | The ⇅ button exports everything saved in the browser to one file and restores it. |
 
 ## How it avoids fooling you
@@ -125,16 +130,35 @@ only. Backtests, the model lab and seasonality always read exchange bars only.
 
 ## The shared page
 
-`tools/snapshot.py` builds a static copy of the app: `web/` plus recent exchange history for a
-fixed list of 90 symbols. A GitHub Actions job (`.github/workflows/pages.yml`) rebuilds and
-publishes it every ten minutes. A static page cannot fetch the exchange feed itself, so between
-builds the page keeps itself current in the browser: it reads Hyperliquid directly and applies
-the same projection as the server (`web/js/static.js`, a port of the server code that
-`tests/parity.mjs` checks against it on 6,300 shared cases).
+`tools/snapshot.py` builds a static copy of the app: `web/` plus recent exchange history. A GitHub
+Actions job (`.github/workflows/pages.yml`) rebuilds and publishes it on a ten-minute schedule
+(GitHub runs schedules late when it is busy, so expect ten to thirty minutes between builds). A
+static page cannot fetch the exchange feed itself, so between builds the page keeps itself current
+in the browser: it reads Hyperliquid directly and applies the same projection as the server
+(`web/js/static.js`, a port of the server code that `tests/parity.mjs` checks against it on 6,300
+shared cases).
+
+The data set has two tiers, so it can be wide without flooding the provider with requests:
+
+| Tier | Symbols | History | Refreshed |
+| --- | --- | --- | --- |
+| Core | 124: everything with a live proxy, the main futures, ETFs, indexes, currencies, crypto, mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
+| Extended | 494: the rest of the S&P 500 and other followed stocks (`web/universe.json`, with sectors) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
+
+A build fetches only the extended series that are due and carries the others over from the last
+published build, which the job downloads as it was uploaded (reading it back through the public
+site would spend the site's bandwidth allowance on its own upkeep; that route is only the fallback).
+Nothing else is stored. A symbol the provider stops answering for keeps its last published history,
+and a build that would lose a real share of what is published stops instead of replacing it.
 
 What differs from running locally: only the listed symbols have history (plus any `XYZ:` live
-market), 1-minute history is about a day deep, and exchange prints are as old as the last build
-(the status line says how old) with estimates bridging to now where a proxy exists.
+market); extended symbols have no timeframe shorter than an hour and no live estimate; 1-minute
+history is about a day deep; and exchange prints are as old as that series' last refresh (the
+status line says how old) with estimates bridging to now where a proxy exists. The Markets view
+reads one small file with a year of daily closes for every symbol.
+
+To change the stock list, edit `tools/make_universe.py` or feed it a newer constituents table, and
+run it; `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
 
 ## Rules as text
 
@@ -173,7 +197,9 @@ web/js/auto.js       pivots, trendlines, zones, Fibonacci, candlestick and chart
 web/js/chart.js      canvas chart
 web/js/data.js       fetch, cache, derived timeframes, higher-timeframe alignment
 web/js/static.js     data backend for the shared page: snapshot + live fill in the browser
-tools/snapshot.py    builds the shared site
+web/js/markets.js    Markets view: breadth, heat map, sector table, movers
+web/universe.json    stock list with sectors (written by tools/make_universe.py)
+tools/snapshot.py    builds the shared site (two tiers, rolling refresh)
 web/js/conditions.js rule model, evaluator and builder UI      web/js/formula.js  rules as text
 web/js/engine.js     backtest engine        web/js/sim.js   rules -> engine glue
 web/js/research.js   yearly breakdown and parameter sweep

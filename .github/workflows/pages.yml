@@ -6,11 +6,13 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "*/10 * * * *"
+    # every ten minutes, off the top of the hour, when the scheduler is busiest and drops runs
+    - cron: "7,17,27,37,47,57 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -21,14 +23,28 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Most of the wider symbol list is not refetched on a given build but carried over from the
+      # last one. That build is downloaded here as it was uploaded (not read back from the public
+      # site, which would spend the site's bandwidth allowance on its own upkeep).
+      - name: Fetch the last published build
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow pages.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          [ -n "$id" ] || { echo "no earlier successful build"; exit 0; }
+          gh run download "$id" --repo "$GITHUB_REPOSITORY" --name github-pages --dir prev_artifact
+          mkdir -p prev && tar -xf prev_artifact/artifact.tar -C prev && rm -rf prev_artifact
+          ls prev/data | head -20
       - name: Build site and snapshot
-        run: python tools/snapshot.py _site
+        # --site is the fallback when there is no local copy of the last build (it expires after a day)
+        run: python tools/snapshot.py _site --prev=prev --site="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

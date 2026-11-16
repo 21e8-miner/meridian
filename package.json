@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "start": "python3 server.py",
-    "test": "node tests/smoke.mjs && node tests/engine.mjs && node tests/formula.mjs && node tests/lab.mjs && node tests/parity.mjs && python3 tests/test_server.py"
+    "test": "node tests/smoke.mjs && node tests/engine.mjs && node tests/formula.mjs && node tests/lab.mjs && node tests/markets.mjs && node tests/parity.mjs && python3 tests/test_server.py"
   }
 }

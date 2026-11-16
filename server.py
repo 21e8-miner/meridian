@@ -158,8 +158,10 @@ def _round(x: float) -> float:
     return round(x, 8)
 
 
-def _fetch_yahoo(symbol: str, tf: str) -> dict:
-    interval, rng = TF[tf]
+def _fetch_yahoo(symbol: str, tf: str, rng: str | None = None) -> dict:
+    """`rng` asks for a shorter window than the timeframe's default (the snapshot build uses it)."""
+    interval, default = TF[tf]
+    rng = rng or default
     ext = tf == "x1m"
     if rng is None:
         qs = f"interval={interval}&period1=-631152000&period2={int(time.time()) + 86400}"

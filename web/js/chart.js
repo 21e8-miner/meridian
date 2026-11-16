@@ -620,7 +620,7 @@ export class Chart {
       else { const idx = this.idxOf(m.x), nb = clamp(this.view.barW * Math.exp(-e.deltaY * 0.0018), 1.2, 60); this.view.barW = nb; this.view.right = idx + (this.L.pw - m.x) / nb; }
       this.clampView(); this.invalidate();
     }, { passive: false });
-    el.addEventListener('mousedown', (e) => {
+    const down = (e) => {
       if (!this.bars || e.button !== 0) return;
       if (e.target.closest && e.target.closest('.legend, .pane-legends')) return;
       if (this.cb.onFocus) this.cb.onFocus();
@@ -638,7 +638,8 @@ export class Chart {
       if (this.tool === 'hline') { this.addDrawing({ type: 'hline', pts: [pt] }); return; }
       if (this.tool === 'text') { const d = this.addDrawing({ type: 'text', pts: [pt], text: 'Note' }); if (this.cb.onText) this.cb.onText(d); return; }
       if (TWO_POINT.has(this.tool)) { this.draft = { id: uid(), type: this.tool, pts: [pt, { ...pt }], mode: 'drag', x: m.x, y: m.y }; this.invalidate(); }
-    });
+    };
+    el.addEventListener('mousedown', down);
     this.onMove = (e) => {
       if (!this.bars) return;
       const m = pos(e), inside = m.x >= 0 && m.y >= 0 && m.x <= this.w && m.y <= this.h;
@@ -665,6 +666,41 @@ export class Chart {
     };
     window.addEventListener('mousemove', this.onMove);
     window.addEventListener('mouseup', this.onUp);
+    // Touch: one finger does what the mouse does (pan, draw, move the crosshair, which then stays
+    // where the finger left it); two fingers pinch to zoom around the point between them.
+    const asMouse = (t, e) => ({ clientX: t.clientX, clientY: t.clientY, button: 0, target: e.target, shiftKey: false, altKey: false });
+    // Only fingers that are on this chart count: one resting elsewhere on the page, or on another chart, is not ours.
+    const here = (e) => Array.from(e.touches).filter((t) => el.contains(t.target) && !(t.target.closest && t.target.closest('.legend, .pane-legends')));
+    const spread = (f) => { const a = f[0], b = f[1], r = this.canvas.getBoundingClientRect(); return { d: Math.max(8, Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)), x: (a.clientX + b.clientX) / 2 - r.left }; };
+    let pinch = null;
+    el.addEventListener('touchstart', (e) => {
+      if (!this.bars || (e.target.closest && e.target.closest('.legend, .pane-legends'))) return;
+      e.preventDefault();
+      const f = here(e);
+      if (f.length === 1 && !pinch) { down(asMouse(f[0], e)); this.onMove(asMouse(f[0], e)); }
+      else if (f.length === 2) {
+        // a second finger ends whatever the first was doing; a drawing being moved is kept where it is
+        if (this.drag && this.drag.kind === 'draw' && this.drag.moved) this.changed();
+        this.drag = null; if (this.draft && this.draft.mode === 'drag') this.draft = null;
+        const s = spread(f); pinch = { d: s.d, barW: this.view.barW, idx: this.idxOf(s.x) };
+      }
+    }, { passive: false });
+    el.addEventListener('touchmove', (e) => {
+      if (!this.bars || (e.target.closest && e.target.closest('.legend, .pane-legends'))) return;
+      e.preventDefault();
+      const f = here(e);
+      if (pinch) {
+        if (f.length < 2) return;
+        const s = spread(f), nb = clamp(pinch.barW * (s.d / pinch.d), 1.2, 60);
+        this.view.barW = nb; this.view.right = pinch.idx + (this.L.pw - s.x) / nb; this.clampView(); this.invalidate();
+      } else if (f.length === 1) this.onMove(asMouse(f[0], e));
+    }, { passive: false });
+    const lift = (e) => {
+      if (pinch) { if (!here(e).length) pinch = null; return; } // a pinch ends when its fingers are all up
+      if (e.changedTouches.length && !here(e).length) this.onUp(asMouse(e.changedTouches[0], e));
+    };
+    el.addEventListener('touchend', lift);
+    el.addEventListener('touchcancel', lift);
     el.addEventListener('mouseleave', () => { if (!this.drag) { this.mouse = null; if (this.cb.onHover && this.lastHoverT != null) { this.lastHoverT = null; this.cb.onHover(null); } this.invalidate(); } });
     el.addEventListener('dblclick', (e) => {
       const m = pos(e);

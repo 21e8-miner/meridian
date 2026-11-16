@@ -19,6 +19,7 @@
   </div>
   <nav id="nav">
     <button data-view="chart" class="on">Charts</button>
+    <button data-view="markets">Markets</button>
     <button data-view="scanner">Scanner</button>
     <button data-view="strategy">Strategy Tester</button>
     <button data-view="alerts">Alerts &amp; Bots <span id="alert-badge" class="badge" hidden></span></button>
@@ -28,6 +29,7 @@
   </nav>
   <div class="top-right">
     <span id="data-status" class="status" title="Where the active chart's newest data comes from. Free exchange data for futures is about 10 minutes late; for NQ, ES, gold, silver and crude the gap is filled with a live estimate projected from the matching Hyperliquid market (green). Amber means a market is open but no new bars have arrived. Not for order routing."></span>
+    <button id="link-btn" class="icon-btn" title="Copy a link to this view">🔗</button>
     <button id="ws-btn" class="icon-btn" title="Back up or restore your workspace">⇅</button>
     <input id="ws-file" type="file" accept="application/json,.json" hidden>
     <button id="theme-btn" class="icon-btn" title="Toggle light / dark">◐</button>
@@ -46,6 +48,7 @@
       </aside>
     </div>
   </section>
+  <section id="view-markets" class="view"></section>
   <section id="view-scanner" class="view"></section>
   <section id="view-strategy" class="view"></section>
   <section id="view-alerts" class="view"></section>

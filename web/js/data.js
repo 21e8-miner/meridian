@@ -112,7 +112,9 @@ const serverBackend = {
 let backendPromise = null;
 export function backend() {
   if (!backendPromise) backendPromise = (async () => {
-    try { const r = await fetch('api/health', { cache: 'no-store' }); if (r.ok && (await r.json()).ok) return serverBackend; } catch { /* no server here */ }
+    // the published page is marked as having no server (tools/snapshot.py), so it does not ask
+    const marked = typeof document !== 'undefined' && document.documentElement.dataset.backend === 'static';
+    if (!marked) { try { const r = await fetch('api/health', { cache: 'no-store' }); if (r.ok && (await r.json()).ok) return serverBackend; } catch { /* no server here */ } }
     const st = await import('./static.js'); await st.init(); return st;
   })();
   return backendPromise;
@@ -122,13 +124,35 @@ export function backend() {
 export async function universes() {
   const be = await backend(), ix = be.info();
   if (!ix) return UNIVERSES;
-  const all = ix.symbols, pick = (f) => all.filter(f).map((s) => s.symbol);
-  return {
-    [`Shared data set (${all.length})`]: all.map((s) => s.symbol),
-    [`Stocks (${pick((s) => s.type === 'EQUITY').length})`]: pick((s) => s.type === 'EQUITY'),
-    [`ETFs (${pick((s) => s.type === 'ETF').length})`]: pick((s) => s.type === 'ETF'),
-    [`Futures (${pick((s) => s.type === 'FUTURE').length})`]: pick((s) => s.type === 'FUTURE'),
-  };
+  const all = ix.symbols, out = {};
+  const put = (name, f) => { const list = all.filter(f).map((s) => s.symbol); if (list.length) out[`${name} (${list.length})`] = list; };
+  // the lightest list first: it is what a scan starts on
+  put('Core set · every timeframe', (s) => s.tier !== 2);
+  put('Stocks', (s) => s.type === 'EQUITY');
+  (ix.sectors || []).forEach((name, k) => put(name, (s) => s.sector === k));
+  put('ETFs', (s) => s.type === 'ETF');
+  put('Futures', (s) => s.type === 'FUTURE');
+  put('Indexes', (s) => s.type === 'INDEX');
+  put('Currencies', (s) => s.type === 'CURRENCY');
+  put('Crypto', (s) => s.type === 'CRYPTOCURRENCY');
+  put('Everything shared', () => true);
+  return out;
+}
+// Which timeframes can be charted for a symbol: null means all of them (always, with a server).
+// On the shared page most stocks have daily and hourly history only.
+export async function availableTfs(symbol) {
+  const be = await backend();
+  if (!be.tfs) return null;
+  const have = be.tfs(symbol);
+  if (!have) return null;
+  const src = (id) => (id === '15m' || id === '30m' ? '5m' : TF[id].base);
+  return new Set(TFS.filter((t) => have.includes(src(t.id))).map((t) => t.id));
+}
+// Sector of each listed stock, for grouping: { sectors: [name], stocks: { SYM: index } }.
+let universePromise = null;
+export function stockSectors() {
+  if (!universePromise) universePromise = fetch('universe.json').then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))).catch(() => ({ sectors: [], stocks: {} }));
+  return universePromise;
 }
 
 async function fetchJson(url) {

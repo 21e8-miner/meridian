@@ -163,4 +163,42 @@ try:
 except RuntimeError as e:
     check("error surfaced", "No data" in str(e))
 check("trim keeps adj", server._trim(bd, 1).get("a") == [11.5])
+
+# ── the snapshot build: which extended series are due, and the market summary rows ──
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+import snapshot as snap
+ets = lambda *a: datetime(*a, tzinfo=ET).timestamp()  # New York wall clock -> UTC seconds
+mon10 = ets(2026, 11, 16, 10, 0); fri16 = ets(2026, 11, 13, 16, 0)
+check("last close: Friday's from Monday morning and across the weekend", snap.last_close(mon10) == fri16 and snap.last_close(ets(2026, 11, 14, 12, 0)) == fri16 and snap.last_close(ets(2026, 11, 15, 23, 0)) == fri16)
+check("last close: today's from 16:00 on, yesterday's before", snap.last_close(ets(2026, 11, 16, 16, 0)) == ets(2026, 11, 16, 16, 0) and snap.last_close(ets(2026, 11, 17, 3, 0)) == ets(2026, 11, 16, 16, 0))
+check("last close holds across a daylight-saving change", snap.last_close(ets(2026, 11, 2, 9, 0)) == ets(2026, 10, 30, 16, 0))
+check("stock session: 09:30 until the bars settle after the close, weekdays only", snap.stock_session(mon10) and not snap.stock_session(ets(2026, 11, 16, 9, 29)) and snap.stock_session(ets(2026, 11, 16, 16, 29)) and not snap.stock_session(ets(2026, 11, 16, 16, 30)) and not snap.stock_session(ets(2026, 11, 14, 11, 0)))
+inf = float("inf")
+check("due: never fetched is always due", snap.due_score(None, "1d", mon10, True) == inf and snap.due_score(0, "1h", mon10, False) == inf)
+check("due while trading: by age against the target (30 min daily, 60 min hourly)", abs(snap.due_score(mon10 - 2700, "1d", mon10, True) - 1.5) < 1e-9 and abs(snap.due_score(mon10 - 2700, "1h", mon10, True) - 0.75) < 1e-9)
+sat = ets(2026, 11, 14, 12, 0)
+check("due while shut: only a copy from before the last session settled", snap.due_score(fri16 + 1700, "1d", sat, False) >= 1 and snap.due_score(fri16 + 1900, "1d", sat, False) == 0 and snap.due_score(fri16 - 86400 * 3, "1h", sat, False) > snap.due_score(fri16 + 60, "1h", sat, False) >= 1)
+check("due on a holiday: the clock says open, but nothing trades, so nothing is refetched", snap.due_score(fri16 + 3600, "1d", mon10, False) == 0)
+check("due: a symbol the provider had nothing for is left alone, then asked about again", snap.due_score(-(mon10 - 3600), "1d", mon10, True) == -1 and snap.due_score(-(mon10 - 7 * 3600), "1d", mon10, True) == inf)
+keys = [(s, tf) for s in ("A", "B", "C", "D", "E") for tf in ("1d", "1h")]
+state = {"A|1d": mon10 - 4000, "A|1h": mon10 - 4000, "B|1d": mon10 - 2000, "B|1h": mon10 - 2000, "C|1d": mon10 - 9000, "C|1h": mon10 - 100, "D|1d": -(mon10 - 60), "D|1h": -(mon10 - 60)}
+due, carry = snap.plan_refresh(state, keys, mon10, 2, True)
+check("plan: missing first, then the most overdue up to the budget", due == [("E", "1d"), ("E", "1h"), ("C", "1d"), ("A", "1d")], str(due))
+check("plan: everything else published is carried; the dead are in neither list", carry == [("A", "1h"), ("B", "1d"), ("B", "1h"), ("C", "1h")], str(carry))
+due0, carry0 = snap.plan_refresh(state, keys, mon10, 0, True)
+check("plan: with no budget only the missing are fetched", due0 == [("E", "1d"), ("E", "1h")] and len(carry0) == 6)
+dueS, carryS = snap.plan_refresh({k: fri16 + 3600 for k in ("A|1d", "A|1h")}, keys[:2], sat, 99, False)
+check("plan: nothing is due at the weekend once the close is in", dueS == [] and carryS == keys[:2])
+days = [20000 + i for i in range(500) if (20000 + i) % 7 not in (2, 3)]
+pd_ = {"t": [d * 86400 for d in days], "c": [10 + 0.01 * i for i in range(len(days))], "v": [1000 + i for i in range(len(days))], "fetched": 42, "meta": {"type": "EQUITY"}}
+row = snap.pack_row(pd_)
+check("pack row: a year of closes as day gaps", row["d0"] + sum(row["dd"]) == days[-1] and len(row["c"]) == len(row["dd"]) + 1 and row["c"][-1] == pd_["c"][-1] and row["d0"] >= days[-1] - 375 and days[len(days) - len(row["c"]) - 1] < days[-1] - 375 and row["f"] == 42)
+nn = len(days); want = sum(pd_["c"][i] * pd_["v"][i] for i in range(nn - 21, nn - 1)) / 20
+check("pack row: dollar volume of the 20 bars before the newest", row["dv"] == int(want + 0.5))
+check("pack row: a one-bar series does not divide by zero", snap.pack_row({"t": [86400], "c": [5.0], "v": [9], "meta": {"type": "ETF"}})["dv"] == 0)
+check("pack row: crypto volume is already dollars; indexes, futures and currencies have no dollar figure", snap.pack_row({**pd_, "meta": {"type": "CRYPTOCURRENCY"}})["dv"] == int(sum(pd_["v"][nn - 21:nn - 1]) / 20 + 0.5) and all(snap.pack_row({**pd_, "meta": {"type": k}})["dv"] == 0 for k in ("INDEX", "FUTURE", "CURRENCY", "")) and snap.pack_row({k: pd_[k] for k in "tcv"})["dv"] == 0)
+thu = ets(2026, 11, 26, 16, 7); wed16 = ets(2026, 11, 25, 16, 0)
+check("due on a holiday afternoon: by the calendar the close was today, but the last session was yesterday's", snap.due_score(wed16 + 3600, "1d", thu, False) >= 1 and snap.due_score(wed16 + 3600, "1d", thu, False, wed16) == 0 and snap.due_score(wed16 + 600, "1d", thu, False, wed16) >= 1)
+check("plan passes the last session's close through", snap.plan_refresh({"A|1d": wed16 + 3600, "A|1h": wed16 + 3600}, keys[:2], thu, 99, False, wed16)[0] == [])
+check("the two tiers do not overlap, and every proxied symbol is core", not set(snap.CORE) & set(snap.EXTENDED) and set(server.LIVE_PROXY) | set(server.STOCK_PROXY) <= set(snap.CORE) and len(snap.EXTENDED) > 350)
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)

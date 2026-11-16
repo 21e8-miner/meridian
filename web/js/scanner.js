@@ -20,7 +20,7 @@ const PRESETS = {
 
 let cfg, resEl, statusEl, barEl, rows = [], sortK = 'chg', desc = true, cols = [];
 const persist = () => store.set('scan.cfg', cfg);
-let UNI = {};
+let UNI = {}, uniReady = false;
 const lists = () => ({ ...UNI, ...Object.fromEntries(Object.entries(api.watchlists()).map(([k, v]) => ['Watchlist: ' + k, v])) });
 
 export function mount(el) {
@@ -29,7 +29,7 @@ export function mount(el) {
   el.append(h('div', { class: 'cols' }, left, resEl));
   const drawCfg = () => {
     clear(left);
-    const L = lists(); if (!L[cfg.universe]) cfg.universe = Object.keys(L)[0];
+    const L = lists(); if (uniReady && !L[cfg.universe]) cfg.universe = Object.keys(L)[0]; // only once the lists are known
     statusEl = h('span', { class: 'muted' }); barEl = h('i');
     left.append(h('h2', null, 'Scanner'), h('p', { class: 'hint' }, 'Find symbols that meet every condition. Each condition can read its own timeframe; higher-timeframe values count only once that bar has closed.'),
       h('div', { class: 'row' },
@@ -42,7 +42,7 @@ export function mount(el) {
       h('div', { class: 'progress' }, barEl));
   };
   drawCfg();
-  universes().then((u) => { UNI = u; drawCfg(); });
+  universes().then((u) => { UNI = u; uniReady = true; drawCfg(); });
   resEl.append(h('div', { class: 'empty' }, 'Run a scan to see matches.'));
 }
 

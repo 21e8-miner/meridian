@@ -1,6 +1,6 @@
 // App shell: navigation, chart panels, toolbar, drawing tools, watchlist, analysis panel.
 import { h, clear, store, bus, toast, modal, menu, uid, fmtPrice, fmtPct, fmtNum, fmtStamp, fmtTime, downloadText, parseWorkspace } from './util.js';
-import { TFS, TF, tfLabel, isIntraday, getBars, getBatch, searchSymbols, alignToBase, tfsAtOrAbove, backend } from './data.js';
+import { TFS, TF, tfLabel, isIntraday, getBars, getBatch, searchSymbols, alignToBase, tfsAtOrAbove, backend, availableTfs } from './data.js';
 import { IND, calcIndicator, defaultParams, indLabel, sma, rsi } from './ta.js';
 import { autoTrendlines, autoLevels, autoFib, detectCandles, chartPatterns, openGaps } from './auto.js';
 import { Chart } from './chart.js';
@@ -63,6 +63,12 @@ class Panel {
       if (this.idx === state.active) updateStatus();
     } catch (e) {
       if (token !== this.token) return;
+      if (e.code === 'tf' && tf !== '1d') {
+        // the shared page keeps short timeframes for its core symbols only: show what there is
+        toast(`${e.message}. Showing daily.`);
+        this.cfg.tf = '1d'; save(); if (this.idx === state.active) { syncToolbar(); writeHash(); }
+        return this.load();
+      }
       if (!keepView) { this.bars = null; this.chart.setBars(null); this.chart.setMessage(`${symbol}: ${e.message}`); }
     }
     if (this.idx === state.active) renderAnalysis();
@@ -151,6 +157,7 @@ function buildPanels() {
   for (const p of panels) { p.token++; p.chart.destroy(); }
   clear(grid); grid.className = 'chart-grid l' + count;
   while (state.cfgs.length < count) { const src = state.cfgs[0]; const c = JSON.parse(JSON.stringify(src)); c.inds.forEach((i) => (i.uid = uid())); c.tf = ['1d', '1w', '1h', '15m'][state.cfgs.length] || '1d'; state.cfgs.push(c); }
+  save(); // a panel added for a wider layout is part of the saved workspace from the start
   panels = state.cfgs.slice(0, count).map((cfg, i) => new Panel(cfg, i));
   for (const p of panels) grid.append(p.el);
   if (state.active >= count) state.active = 0;
@@ -162,20 +169,20 @@ function setActive(i, force) {
   if (i === state.active && !force) return;
   state.active = i;
   panels.forEach((p, k) => p.el.classList.toggle('active', k === i));
-  syncToolbar(); renderWatchlist(); renderAnalysis(); updateStatus();
+  syncToolbar(); renderWatchlist(); renderAnalysis(); updateStatus(); writeHash();
   bus.emit('symbol', cur().cfg.symbol);
 }
 function setSymbol(sym, tf) {
   const p = cur(); sym = sym.toUpperCase().trim(); if (!sym) return;
   p.cfg.symbol = sym; if (tf) p.cfg.tf = tf;
-  save(); syncToolbar(); renderWatchlist(); p.load(); bus.emit('symbol', sym);
+  save(); syncToolbar(); renderWatchlist(); writeHash(); p.load(); bus.emit('symbol', sym);
 }
 function setTool(t) { state.tool = t; for (const p of panels) p.chart.setTool(t); document.querySelectorAll('#draw-tools button[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); }
 
 // ───────────────────────── toolbar ─────────────────────────
 function buildToolbar() {
   const bar = $('chart-toolbar'); clear(bar);
-  const tfGrp = h('div', { class: 'grp', id: 'tb-tf' }, TFS.map((t) => h('button', { 'data-tf': t.id, title: t.id, onclick: () => { cur().cfg.tf = t.id; save(); syncToolbar(); cur().load(); } }, t.label)));
+  const tfGrp = h('div', { class: 'grp', id: 'tb-tf' }, TFS.map((t) => h('button', { 'data-tf': t.id, title: t.id, onclick: () => { cur().cfg.tf = t.id; save(); syncToolbar(); writeHash(); cur().load(); } }, t.label)));
   const typeSel = h('select', { id: 'tb-type', title: 'Chart type', onchange: (e) => { cur().cfg.type = e.target.value; save(); cur().chart.setOptions({ type: e.target.value }); } }, TYPES.map(([v, l]) => h('option', { value: v }, l)));
   const tog = (id, label, title, key) => h('button', { id, title, onclick: () => { const c = cur().cfg; c[key] = !c[key]; save(); cur().chart.setOptions({ [key]: c[key] }); syncToolbar(); } }, label);
   bar.append(tfGrp,
@@ -198,6 +205,9 @@ function syncToolbar() {
   $('tb-vol').classList.toggle('on', c.volume); $('tb-vp').classList.toggle('on', c.vp); $('tb-log').classList.toggle('on', c.log); $('tb-adj').classList.toggle('on', !!c.adj);
   $('tb-trades').hidden = !(cur().trades && cur().trades.length);
   $('symbol-input').placeholder = `${c.symbol} — type to search`;
+  // dim the timeframes this symbol has no history for (the shared page keeps short ones for core symbols only)
+  const sym = c.symbol;
+  availableTfs(sym).then((ok) => { if (cur() && cur().cfg.symbol === sym) document.querySelectorAll('#tb-tf button').forEach((b) => { const na = !!ok && !ok.has(b.dataset.tf); b.classList.toggle('na', na); b.title = na ? `${sym} has daily and hourly history on the shared page` : b.dataset.tf; }); }).catch(() => {});
 }
 function autoMenu(e) {
   const r = e.currentTarget.getBoundingClientRect(), c = cur().cfg;
@@ -432,7 +442,7 @@ async function importWorkspace(e) {
 // ───────────────────────── views ─────────────────────────
 const mounted = {};
 const loaders = {
-  scanner: () => import('./scanner.js'), strategy: () => import('./backtest.js'), alerts: () => Promise.resolve(alerts),
+  markets: () => import('./markets.js'), scanner: () => import('./scanner.js'), strategy: () => import('./backtest.js'), alerts: () => Promise.resolve(alerts),
   studio: () => import('./studio.js'), lab: () => import('./lab.js'), seasonality: () => import('./seasonality.js'),
 };
 async function goto(view) {
@@ -444,7 +454,34 @@ async function goto(view) {
     try { const mod = await loaders[view](); mod.mount($('view-' + view)); } catch (e) { console.error(e); $('view-' + view).append(h('div', { class: 'empty' }, 'This view failed to load: ' + e.message)); }
   }
   if (view === 'chart') for (const p of panels) p.chart.resize();
+  writeHash();
   bus.emit('view', view);
+}
+
+// ───────────────────────── links ─────────────────────────
+// The address always names what is on screen (#/chart/NQ=F/5m, #/markets), so it can be copied
+// and opened by someone else. Layouts, drawings and indicators stay in each browser.
+const VIEWS = ['chart', 'markets', 'scanner', 'strategy', 'alerts', 'studio', 'lab', 'seasonality'];
+function readHash() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+  if (!parts.length || !VIEWS.includes(parts[0])) return null;
+  const sym = parts[0] === 'chart' && parts[1] && /^[A-Za-z0-9^=.:\-]{1,24}$/.test(parts[1]) ? parts[1].toUpperCase() : null;
+  return { view: parts[0], symbol: sym, tf: sym && TFS.some((t) => t.id === parts[2]) ? parts[2] : null };
+}
+function writeHash() {
+  const p = cur(); if (!p) return;
+  const want = state.view === 'chart' ? `#/chart/${encodeURIComponent(p.cfg.symbol).replace(/%3D/g, '=').replace(/%5E/g, '^').replace(/%3A/g, ':')}/${p.cfg.tf}` : `#/${state.view}`;
+  if (location.hash !== want) history.replaceState(null, '', want);
+}
+function applyHash() {
+  const hsh = readHash(); if (!hsh) return;
+  if (hsh.view !== state.view) goto(hsh.view);
+  if (hsh.symbol && (hsh.symbol !== cur().cfg.symbol || (hsh.tf && hsh.tf !== cur().cfg.tf))) setSymbol(hsh.symbol, hsh.tf);
+}
+async function copyLink() {
+  writeHash();
+  try { await navigator.clipboard.writeText(location.href); toast(location.hostname === '127.0.0.1' || location.hostname === 'localhost' ? 'Link copied. It opens on this computer only: share the published page to send a chart to someone.' : 'Link copied. It opens this view for anyone.', 'ok'); }
+  catch { toast('Copy the address from the address bar: ' + location.href); }
 }
 
 function init() {
@@ -466,6 +503,17 @@ function init() {
     ]);
   });
   $('ws-file').addEventListener('change', importWorkspace);
+  $('link-btn').addEventListener('click', copyLink);
+  // a link that names a chart opens it in the first panel
+  const linked = readHash();
+  if (linked && linked.symbol) {
+    // if one of this browser's own panels already shows it (a reload), that panel comes forward;
+    // only a chart that is not on screen takes over the first panel
+    const at = state.cfgs.slice(0, state.layout).findIndex((c) => c.symbol === linked.symbol && (!linked.tf || c.tf === linked.tf));
+    if (at >= 0) state.active = at;
+    else { state.cfgs[0].symbol = linked.symbol; if (linked.tf) state.cfgs[0].tf = linked.tf; state.active = 0; }
+  }
+  window.addEventListener('hashchange', applyHash);
 
   Object.assign(api, {
     openChart(symbol, tf) { goto('chart'); setSymbol(symbol, tf); },
@@ -482,6 +530,7 @@ function init() {
   backend().then((be) => { if (be.mode !== 'static') return; document.documentElement.dataset.mode = 'shared'; const ix = be.info(); $('symbol-input').title = `Shared page: ${ix.symbols.length} symbols with history, plus Hyperliquid's live markets (try XYZ100). Run Meridian locally to chart anything.`; });
   loadCustomIndicators(); loadModels();
   buildToolbar(); buildDrawTools(); initSearch(); buildPanels(); renderWatchlist(); refreshQuotes();
+  if (linked && linked.view !== 'chart') goto(linked.view); else writeHash();
   alerts.start();
   bus.on('alerts', () => { for (const p of panels) p.chart.setAlertLines(alerts.priceLevels(p.cfg.symbol)); });
   bus.on('rulesets', () => renderAnalysis());

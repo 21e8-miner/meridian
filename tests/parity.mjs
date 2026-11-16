@@ -2,6 +2,7 @@
 // answers as server.py on the same inputs. tests/parity.json is written by tests/make_parity.py.
 import { readFileSync } from 'node:fs';
 import * as S from '../web/js/static.js';
+import { packFromBars, decodePack } from '../web/js/markets.js';
 import { check, done } from './fixture.mjs';
 
 const { cases } = JSON.parse(readFileSync(new URL('./parity.json', import.meta.url)));
@@ -20,6 +21,7 @@ const run = {
   liveAnchor: (a) => S.liveAnchor(...a), anchorFrom1m: (a) => S.anchorFrom1m(...a),
   spliceLive: (a) => S.spliceLive(...a), spliceExt: (a) => S.spliceExt(...a),
   stockMinutes: (a) => S.stockMinutes(...a), mergeMinutes: (a) => S.mergeMinutes(...a), parseHl: (a) => S.parseHl(...a),
+  pack: (a) => { const d = decodePack(a[1]); return { fromBars: packFromBars(a[0]), decoded: { t: d.t, c: d.c, dv: d.dv } }; },
 };
 const tally = {};
 for (const c of cases) {
