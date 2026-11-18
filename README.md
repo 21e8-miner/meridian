@@ -6,8 +6,8 @@ a small model lab and seasonality tables. One Python file serves it; the front e
 step and no dependencies.
 
 **Shared page:** https://21e8-miner.github.io/meridian/ — runs in the browser with no install, on
-about 610 symbols (the S&P 500 and other followed stocks, ETFs, futures, indexes, currencies,
-crypto) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
+about 2,100 symbols (every US stock over $2B, the S&P 500 with sectors, 150 ETFs, futures,
+world indexes, currencies, crypto) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
 
 ## Run
 
@@ -145,8 +145,9 @@ The data set has two tiers, so it can be wide without flooding the provider with
 
 | Tier | Symbols | History | Refreshed |
 | --- | --- | --- | --- |
-| Core | 124: everything with a live proxy, the main futures, ETFs, indexes, currencies, crypto, mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
-| Extended | 494: the rest of the S&P 500 and other followed stocks (`web/universe.json`, with sectors) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
+| Core | 182: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
+| Extended | 595: the rest of the S&P 500 and other followed stocks, with sectors, and about 100 more ETFs (`web/universe.json`) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
+| Broad | 1402: every other US-listed common stock over $2B market cap (from Nasdaq's public screener; sectors are Nasdaq's, mapped onto the GICS names, so rougher) | 10 years daily | within about an hour while the market is open. A refresh asks for the last month only and joins it onto the carried history; if the two disagree on any shared day (a split or dividend restated the history) or the history is a week old, the whole series is fetched again |
 
 A build fetches only the extended series that are due and carries the others over from the last
 published build, which the job downloads as it was uploaded (reading it back through the public
@@ -155,13 +156,15 @@ Nothing else is stored. A symbol the provider stops answering for keeps its last
 and a build that would lose a real share of what is published stops instead of replacing it.
 
 What differs from running locally: only the listed symbols have history (plus any `XYZ:` live
-market); extended symbols have no timeframe shorter than an hour and no live estimate; 1-minute
+market); extended symbols have no timeframe shorter than an hour and broad ones nothing shorter
+than a day, and neither has a live estimate; a scan over a big list downloads about 0.13 MB per
+symbol the first time; 1-minute
 history is about a day deep; and exchange prints are as old as that series' last refresh (the
 status line says how old) with estimates bridging to now where a proxy exists. The Markets view
 reads one small file with a year of daily closes for every symbol.
 
-To change the stock list, edit `tools/make_universe.py` or feed it a newer constituents table, and
-run it; `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
+To change the lists, edit `tools/make_universe.py` or feed it a newer constituents table and
+screener file (its docstring says where each comes from), and run it; `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
 
 ## Rules as text
 
@@ -182,7 +185,7 @@ only `or`.
 
 ## Limits
 
-- **Data** is Yahoo's public chart feed through the local server, cached in `.cache/`. History goes
+- **Data** is Yahoo's public chart feed through the local server, cached in `~/Library/Caches/meridian` (set `MERIDIAN_CACHE` to move it). The cache keeps itself under 512 MB and drops series not fetched for two weeks. History goes
   back 7 days for 1-minute bars, 60 days for 5–30 minute bars and about two years for hourly bars.
   US-listed stocks, ETFs, indexes, futures, currencies and crypto pairs work; there are no options,
   fundamentals, filings or news.

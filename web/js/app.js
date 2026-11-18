@@ -207,7 +207,7 @@ function syncToolbar() {
   $('symbol-input').placeholder = `${c.symbol} — type to search`;
   // dim the timeframes this symbol has no history for (the shared page keeps short ones for core symbols only)
   const sym = c.symbol;
-  availableTfs(sym).then((ok) => { if (cur() && cur().cfg.symbol === sym) document.querySelectorAll('#tb-tf button').forEach((b) => { const na = !!ok && !ok.has(b.dataset.tf); b.classList.toggle('na', na); b.title = na ? `${sym} has daily and hourly history on the shared page` : b.dataset.tf; }); }).catch(() => {});
+  availableTfs(sym).then((ok) => { if (cur() && cur().cfg.symbol === sym) document.querySelectorAll('#tb-tf button').forEach((b) => { const na = !!ok && !ok.has(b.dataset.tf); b.classList.toggle('na', na); b.title = na ? `${sym} has ${ok.has('1h') ? 'daily and hourly' : 'daily'} history on the shared page` : b.dataset.tf; }); }).catch(() => {});
 }
 function autoMenu(e) {
   const r = e.currentTarget.getBoundingClientRect(), c = cur().cfg;

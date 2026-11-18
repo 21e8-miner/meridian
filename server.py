@@ -31,7 +31,12 @@ from zoneinfo import ZoneInfo
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(ROOT, "web")
-CACHE = os.path.join(ROOT, ".cache", "v4")
+# The disk cache lives in the user's cache folder, not next to the code: that folder may be synced
+# (iCloud Documents) and the cache churns. macOS may also clear it when the disk runs low, which
+# is fine: everything in it is fetched again on demand. MERIDIAN_CACHE moves it.
+CACHE = os.path.join(os.environ.get("MERIDIAN_CACHE") or os.path.join(os.path.expanduser("~"), "Library", "Caches", "meridian"), "v4")
+CACHE_MAX_BYTES = 512 * 1024 * 1024   # oldest files go first once the cache is bigger than this
+CACHE_MAX_AGE = 14 * 86400            # a series not fetched again for this long is dropped
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8830"))
 UA = "Mozilla/5.0"  # the provider rate-limits long browser-style agents
 TIMEOUT = 12
@@ -607,6 +612,47 @@ def hl_markets() -> list:
     return _hl_names[1]
 
 
+def prune_cache(root: str = None, max_bytes: int = CACHE_MAX_BYTES, max_age: float = CACHE_MAX_AGE, now: float | None = None) -> tuple[int, int]:
+    """Drop cached series nobody has fetched for `max_age` seconds, then the oldest until the cache
+    fits in `max_bytes`. Returns (files removed, bytes freed)."""
+    root = root or CACHE
+    now = time.time() if now is None else now
+    files = []
+    for dp, _, fns in os.walk(root):
+        for fn in fns:
+            p = os.path.join(dp, fn)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, p))
+    files.sort()
+    total = sum(sz for _, sz, _ in files)
+    removed = freed = 0
+    for mt, sz, p in files:
+        if now - mt <= max_age and total <= max_bytes:
+            break  # sorted oldest first: everything after this is newer
+        try:
+            os.remove(p)
+        except OSError:
+            continue
+        total -= sz
+        removed += 1
+        freed += sz
+    return removed, freed
+
+
+def _prune_forever():
+    while True:
+        try:
+            n, b = prune_cache()
+            if n:
+                print(f"cache: removed {n} old files, {b / 1e6:.0f} MB", flush=True)
+        except Exception as e:  # never take the server down over housekeeping
+            print("cache prune failed:", e, flush=True)
+        time.sleep(3600)
+
+
 def _disk_path(symbol: str, tf: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-._=^" else "_" for ch in symbol)
     return os.path.join(CACHE, tf, safe + ".json")
@@ -778,6 +824,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     os.makedirs(CACHE, exist_ok=True)
+    threading.Thread(target=_prune_forever, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     srv.daemon_threads = True
     print(f"Meridian on http://127.0.0.1:{PORT}", flush=True)

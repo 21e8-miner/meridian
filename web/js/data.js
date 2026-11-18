@@ -127,8 +127,9 @@ export async function universes() {
   const all = ix.symbols, out = {};
   const put = (name, f) => { const list = all.filter(f).map((s) => s.symbol); if (list.length) out[`${name} (${list.length})`] = list; };
   // the lightest list first: it is what a scan starts on
-  put('Core set · every timeframe', (s) => s.tier !== 2);
-  put('Stocks', (s) => s.type === 'EQUITY');
+  put('Core set · every timeframe', (s) => !s.tier || s.tier === 1);
+  put('S&P 500', (s) => s.sp);
+  put('US stocks', (s) => s.type === 'EQUITY');
   (ix.sectors || []).forEach((name, k) => put(name, (s) => s.sector === k));
   put('ETFs', (s) => s.type === 'ETF');
   put('Futures', (s) => s.type === 'FUTURE');

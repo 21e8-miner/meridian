@@ -248,10 +248,11 @@ async function loadIndex(force = false) {
   } catch (e) { if (!index) throw new Error('the shared data set could not be loaded (' + e.message + ')'); }
   return index;
 }
-const SHORT = 'has daily and hourly history on the shared page; shorter timeframes are kept for the core symbols';
+// what a symbol has on the shared page, in words: 'daily and hourly history', 'daily history'
+export const kept = (tfs) => `${tfs.filter((t) => t === '1d' || t === '1h').map((t) => (t === '1d' ? 'daily' : 'hourly')).join(' and ')} history`;
 async function loadFile(tf, symbol) {
   const ix = await loadIndex(), key = tf + '|' + symbol, hit = files.get(key), e = ix.by.get(symbol);
-  if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} ${SHORT}` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
+  if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} has ${kept(e.tfs)} on the shared page; shorter timeframes are kept for the core symbols` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
   if (hit && hit.g === ix.generated) return hit.p || hit.data;
   // core files change with every build; the rest change a few times an hour at most, so they are
   // left to the browser's own cache (the site serves them as fresh for ten minutes)

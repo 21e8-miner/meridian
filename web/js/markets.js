@@ -267,9 +267,9 @@ export async function mount(el) {
   shared = !!be.info();
   const uni = await universes(), wls = Object.fromEntries(Object.entries(api.watchlists()).map(([k, v]) => ['Watchlist: ' + k, v]));
   lists = { ...uni, ...wls };
-  // start on the stock list: the widest one that groups by sector
+  // start on the S&P 500: it groups by sector and loads quickly
   const names = Object.keys(lists);
-  if (!lists[cfg.list]) cfg.list = names.find((k) => k.startsWith('Stocks')) || names.find((k) => k.startsWith('Large caps')) || names[0];
+  if (!lists[cfg.list]) cfg.list = names.find((k) => k.startsWith('S&P 500')) || names.find((k) => k.startsWith('Large caps')) || names[0];
   let rt = null;
   const relay = () => { clearTimeout(rt); rt = setTimeout(() => { if (drawn && root.offsetParent) drawn(); }, 80); };
   window.addEventListener('resize', relay);

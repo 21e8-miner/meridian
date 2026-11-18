@@ -1,6 +1,6 @@
 // Market scanner: multi-factor, multi-timeframe rules run across a symbol list.
 import { h, clear, store, toast, fmtPrice, fmtPct, fmtVol, fmtNum, downloadText, toCsv } from './util.js';
-import { TFS, TF, tfLabel, getBatch, universes } from './data.js';
+import { TFS, TF, tfLabel, getBatch, universes, backend } from './data.js';
 import { sma } from './ta.js';
 import { ruleBuilder, evalRuleset, requiredTfs, describeRuleset, operandLabel, leftValue, cmp, price, num, ind, newRuleset } from './conditions.js';
 import { api } from './api.js';
@@ -20,7 +20,7 @@ const PRESETS = {
 
 let cfg, resEl, statusEl, barEl, rows = [], sortK = 'chg', desc = true, cols = [];
 const persist = () => store.set('scan.cfg', cfg);
-let UNI = {}, uniReady = false;
+let UNI = {}, uniReady = false, shared = false;
 const lists = () => ({ ...UNI, ...Object.fromEntries(Object.entries(api.watchlists()).map(([k, v]) => ['Watchlist: ' + k, v])) });
 
 export function mount(el) {
@@ -33,16 +33,18 @@ export function mount(el) {
     statusEl = h('span', { class: 'muted' }); barEl = h('i');
     left.append(h('h2', null, 'Scanner'), h('p', { class: 'hint' }, 'Find symbols that meet every condition. Each condition can read its own timeframe; higher-timeframe values count only once that bar has closed.'),
       h('div', { class: 'row' },
-        h('label', { class: 'field' }, 'Scan', h('select', { onchange: (e) => { cfg.universe = e.target.value; persist(); } }, Object.entries(L).map(([k, v]) => h('option', { value: k, selected: cfg.universe === k }, k.includes('(') ? k : `${k} (${v.length})`)))),
+        h('label', { class: 'field' }, 'Scan', h('select', { onchange: (e) => { cfg.universe = e.target.value; persist(); drawCfg(); } }, Object.entries(L).map(([k, v]) => h('option', { value: k, selected: cfg.universe === k }, k.includes('(') ? k : `${k} (${v.length})`)))),
         h('label', { class: 'field' }, 'Timeframe', h('select', { onchange: (e) => { cfg.tf = e.target.value; persist(); drawCfg(); } }, TFS.map((t) => h('option', { value: t.id, selected: cfg.tf === t.id }, t.label)))),
         h('label', { class: 'field', title: 'Match if the rules were met on any of the last N bars' }, 'Within bars', h('input', { type: 'number', min: 1, max: 50, value: cfg.within, onchange: (e) => { cfg.within = Math.max(1, e.target.value | 0); persist(); } })),
         h('label', { class: 'field' }, 'Start from', h('select', { onchange: (e) => { const f = PRESETS[e.target.value]; if (f) { cfg.rs = f(); persist(); drawCfg(); } } }, h('option', { value: '' }, 'Preset…'), Object.keys(PRESETS).map((k) => h('option', { value: k }, k))))),
+      // on the shared page every symbol is a file to download: say so before a big one
+      shared && (L[cfg.universe] || []).length > 250 ? h('p', { class: 'hint' }, `${(L[cfg.universe] || []).length} symbols: the first run downloads about ${Math.round((L[cfg.universe] || []).length * 0.13)} MB of history (less on later runs, which come from the browser's cache).`) : null,
       ruleBuilder(cfg.rs, { title: 'Conditions', baseTf: () => cfg.tf, onChange: persist }),
       h('div', { class: 'row' }, h('button', { class: 'primary', onclick: run }, 'Run scan'), statusEl),
       h('div', { class: 'progress' }, barEl));
   };
   drawCfg();
-  universes().then((u) => { UNI = u; uniReady = true; drawCfg(); });
+  universes().then(async (u) => { UNI = u; uniReady = true; shared = !!(await backend()).info(); drawCfg(); });
   resEl.append(h('div', { class: 'empty' }, 'Run a scan to see matches.'));
 }
 

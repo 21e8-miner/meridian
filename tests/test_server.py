@@ -200,5 +200,38 @@ check("pack row: crypto volume is already dollars; indexes, futures and currenci
 thu = ets(2026, 11, 26, 16, 7); wed16 = ets(2026, 11, 25, 16, 0)
 check("due on a holiday afternoon: by the calendar the close was today, but the last session was yesterday's", snap.due_score(wed16 + 3600, "1d", thu, False) >= 1 and snap.due_score(wed16 + 3600, "1d", thu, False, wed16) == 0 and snap.due_score(wed16 + 600, "1d", thu, False, wed16) >= 1)
 check("plan passes the last session's close through", snap.plan_refresh({"A|1d": wed16 + 3600, "A|1h": wed16 + 3600}, keys[:2], thu, 99, False, wed16)[0] == [])
+# joining a month of fresh daily bars onto the carried history
+def dser(days, closes, adj=None, fetched=0):
+    d = {"symbol": "X", "tf": "1d", "t": [x * 86400 for x in days], "o": list(closes), "h": list(closes), "l": list(closes), "c": list(closes), "v": [100] * len(days), "meta": {"type": "EQUITY"}, "fetched": fetched}
+    if adj: d["a"] = adj
+    return d
+old = dser(range(100, 140), [10 + i for i in range(40)], fetched=5)
+new = dser(range(118, 142), [10 + i for i in range(18, 39)] + [48.5, 50, 51], fetched=9)   # day 139 was still forming: restated
+j = snap.join_daily(old, new)
+check("join: history before the window kept, the window taken from the fresh fetch", j is not None and j["t"][0] == 100 * 86400 and j["t"][-1] == 141 * 86400 and len(j["t"]) == 42 and j["c"][39] == 48.5 and j["c"][17] == 27 and j["fetched"] == 9 and "a" not in j)
+check("join: remembers when the history was last fetched whole", j["full"] == 5 and snap.join_daily({**old, "full": 3}, new)["full"] == 3)
+split = dser(range(118, 142), [(10 + i) / 2 for i in range(18, 39)] + [24, 25, 25.5])
+check("join: a split (every shared close restated) means fetch it whole", snap.join_daily(old, split) is None)
+divd = dser(range(118, 142), [10 + i for i in range(18, 39)] + [48.5, 50, 51], adj=[(10 + i) * 0.99 for i in range(18, 39)] + [48.5, 50, 51])
+check("join: a dividend (adjustment restated) means fetch it whole", snap.join_daily(old, divd) is None)
+check("join: needs three shared days, and both sides", snap.join_daily(old, dser(range(138, 145), [48, 49, 50, 51, 52, 53, 54])) is None and snap.join_daily(dser([], []), new) is None and snap.join_daily(old, dser([], [])) is None)
+oldadj = dser(range(100, 140), [10 + i for i in range(40)], adj=[(10 + i) * 0.98 for i in range(10)] + [10 + i for i in range(10, 40)])
+ja = snap.join_daily(oldadj, new)
+check("join: an adjusted column from before the window is carried, fresh bars are their own", ja is not None and ja["a"][0] == 10 * 0.98 and ja["a"][-1] == 51 and len(ja["a"]) == len(ja["c"]))
+check("broad tier: daily only, disjoint from the others, refreshed hourly", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.75)
 check("the two tiers do not overlap, and every proxied symbol is core", not set(snap.CORE) & set(snap.EXTENDED) and set(server.LIVE_PROXY) | set(server.STOCK_PROXY) <= set(snap.CORE) and len(snap.EXTENDED) > 350)
+# cache housekeeping
+import tempfile
+with tempfile.TemporaryDirectory() as tdir:
+    T0 = 2_000_000_000
+    for i, (age_days, kb) in enumerate([(30, 10), (20, 10), (5, 300), (3, 300), (1, 300), (0, 100)]):
+        p = os.path.join(tdir, "1d" if i % 2 else "5m", f"S{i}.json"); os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f: f.write(b"x" * kb * 1024)
+        os.utime(p, (T0 - age_days * 86400, T0 - age_days * 86400))
+    n, b = server.prune_cache(tdir, max_bytes=10 ** 9, max_age=14 * 86400, now=T0)
+    check("cache prune: drops series unused for two weeks, keeps the rest", n == 2 and b == 20 * 1024 and not os.path.exists(os.path.join(tdir, "5m", "S0.json")) and os.path.exists(os.path.join(tdir, "5m", "S2.json")))
+    n, b = server.prune_cache(tdir, max_bytes=700 * 1024, max_age=14 * 86400, now=T0)
+    check("cache prune: over the size cap, the oldest go first until it fits", n == 1 and not os.path.exists(os.path.join(tdir, "5m", "S2.json")) and os.path.exists(os.path.join(tdir, "1d", "S3.json")) and os.path.exists(os.path.join(tdir, "1d", "S5.json")))
+    check("cache prune: an empty or missing folder is fine", server.prune_cache(os.path.join(tdir, "none"), now=T0) == (0, 0))
+check("cache lives outside the repository (which may sit in a synced folder)", not os.path.abspath(server.CACHE).startswith(os.path.abspath(server.ROOT)))
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)
