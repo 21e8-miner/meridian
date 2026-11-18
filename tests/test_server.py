@@ -234,4 +234,75 @@ with tempfile.TemporaryDirectory() as tdir:
     check("cache prune: over the size cap, the oldest go first until it fits", n == 1 and not os.path.exists(os.path.join(tdir, "5m", "S2.json")) and os.path.exists(os.path.join(tdir, "1d", "S3.json")) and os.path.exists(os.path.join(tdir, "1d", "S5.json")))
     check("cache prune: an empty or missing folder is fine", server.prune_cache(os.path.join(tdir, "none"), now=T0) == (0, 0))
 check("cache lives outside the repository (which may sit in a synced folder)", not os.path.abspath(server.CACHE).startswith(os.path.abspath(server.ROOT)))
+# ── Prometheus metrics ──
+import re, threading, urllib.request, urllib.error, io
+import metrics as M
+def parse_exposition(text):
+    """A strict reading of the text format: every sample belongs to a declared family, names and
+    labels are well formed, histograms are cumulative and end at +Inf = _count."""
+    fams, samples, errs = {}, [], []
+    for ln in text.splitlines():
+        if not ln:
+            continue
+        m = re.fullmatch(r"# (HELP|TYPE) ([a-zA-Z_:][a-zA-Z0-9_:]*) (.+)", ln)
+        if m:
+            if m.group(1) == "TYPE": fams[m.group(2)] = m.group(3)
+            continue
+        m = re.fullmatch(r'([a-zA-Z_:][a-zA-Z0-9_:]*)(\{(?:[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*"(?:,[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*")*)\})? (\S+)', ln)
+        if not m: errs.append("bad line: " + ln); continue
+        name, labels, val = m.group(1), m.group(2) or "", m.group(3)
+        base = re.sub(r"_(bucket|sum|count)$", "", name) if re.sub(r"_(bucket|sum|count)$", "", name) in fams and fams[re.sub(r"_(bucket|sum|count)$", "", name)] == "histogram" else name
+        if base not in fams: errs.append("undeclared: " + name)
+        try: float(val.replace("+Inf", "inf").replace("NaN", "nan"))
+        except ValueError: errs.append("bad value: " + ln)
+        samples.append((name, labels, val))
+    for fam, kind in fams.items():
+        if kind != "histogram": continue
+        series = {}
+        for name, labels, val in samples:
+            if name == fam + "_bucket":
+                key = re.sub(r',?le="[^"]*"', "", labels); series.setdefault(key, []).append(float(val))
+        for key, vals in series.items():
+            cnt = [float(v) for n, l, v in samples if n == fam + "_count" and l == (key if key != "{}" else "")]
+            if vals != sorted(vals) or not cnt or vals[-1] != cnt[0]: errs.append(f"histogram {fam}{key} not cumulative or +Inf != count")
+    return fams, samples, errs
+h = M.Histogram("t_seconds", "test", ("route",), buckets=(0.1, 1.0))
+for v in (0.05, 0.5, 0.5, 3): h.observe(v, route='a"b\\c')
+text = "\n".join(h.head() + h.lines()) + "\n"
+f_, smp, errs = parse_exposition(text)
+check("metrics: histogram buckets are cumulative, +Inf and count agree, sum adds up", not errs and [v for n, l, v in smp if n == "t_seconds_bucket"] == ["1", "3", "4"] and ("t_seconds_sum", '{route="a\\"b\\\\c"}', "4.05") in smp, str(errs or smp))
+c = M.Counter("t_total", "test", ("x",))
+try: c.inc(-1, x="a"); neg = False
+except ValueError: neg = True
+try: c.inc(x="a", y="b"); bad = False
+except ValueError: bad = True
+check("metrics: counters refuse to go down and refuse unknown labels", neg and bad)
+# provider outcomes, with the network faked
+real = urllib.request.urlopen
+def fake(exc):
+    def f(*a, **k): raise exc
+    return f
+before = dict(server.M_UP.values)
+for exc in (urllib.error.HTTPError("https://query1.finance.yahoo.com/x", 429, "Too Many", {}, io.BytesIO(b"")), TimeoutError("timed out"), urllib.error.URLError("no route")):
+    urllib.request.urlopen = fake(exc)
+    try: server._http_json("https://query1.finance.yahoo.com/v8/finance/chart/X")
+    except Exception: pass
+urllib.request.urlopen = real
+grew = {k: server.M_UP.values.get(k, 0) - before.get(k, 0) for k in server.M_UP.values}
+check("metrics: provider failures are counted by kind and the error still reaches the caller", grew.get(("yahoo", "throttled")) == 1 and grew.get(("yahoo", "timeout")) == 1 and grew.get(("yahoo", "network_error")) == 1, str(grew))
+# the endpoint, on a real local server
+from http.server import ThreadingHTTPServer
+srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler); port = srv.server_address[1]
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+get = lambda path: urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+get("/api/health").read()
+try: get("/api/nope")
+except urllib.error.HTTPError as e: e.read()
+r = get("/metrics"); body = r.read().decode(); ctype = r.headers.get("Content-Type")
+srv.shutdown()
+fams, smp, errs = parse_exposition(body)
+names = {n for n, _, _ in smp}
+check("metrics endpoint: valid exposition format with the right content type", not errs and ctype.startswith("text/plain; version=0.0.4"), str(errs[:3]) + " " + str(ctype))
+check("metrics endpoint: requests are counted by route and status", ("meridian_http_requests_total", '{route="health",code="200"}', "1") in smp and ("meridian_http_requests_total", '{route="unknown_api",code="404"}', "1") in smp, str([x for x in smp if x[0] == "meridian_http_requests_total"]))
+check("metrics endpoint: the families an alert rule reads are all there", {"meridian_upstream_requests_total", "meridian_http_request_duration_seconds_bucket", "meridian_cache_disk_bytes", "meridian_build_info", "meridian_start_time_seconds", "meridian_threads"} <= names and {"meridian_proxy_last_candle_age_seconds", "meridian_live_anchor_age_seconds", "meridian_cache_lookups_total", "meridian_live_fill_total"} <= set(fams), str(sorted(names))[:300])
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)

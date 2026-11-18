@@ -29,6 +29,8 @@ from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
+import metrics as M
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(ROOT, "web")
 # The disk cache lives in the user's cache folder, not next to the code: that folder may be synced
@@ -80,6 +82,29 @@ STOCK_PROXY = {**{n: "xyz:" + n for n in _STOCKS},
                "SPY": "xyz:SP500", "QQQ": "xyz:XYZ100", "GLD": "xyz:GOLD", "IAU": "xyz:GOLD", "SLV": "xyz:SILVER", "USO": "xyz:CL"}
 MAX_PROXY_MINUTES = 15000  # paged, 5000 candles a request; covers a long holiday weekend
 STOCK_TYPES = ("EQUITY", "ETF")
+
+# ── metrics (served at /metrics, see metrics.py and monitoring/) ──
+M_HTTP = M.counter("meridian_http_requests_total", "HTTP requests answered, by route and status code.", ("route", "code"))
+M_HTTP_T = M.histogram("meridian_http_request_duration_seconds", "Time to answer an HTTP request, by route.", ("route",))
+M_UP = M.counter("meridian_upstream_requests_total", "Requests to the data providers, by provider and outcome (ok, throttled, http_error, timeout, network_error).", ("provider", "outcome"))
+M_UP_T = M.histogram("meridian_upstream_request_duration_seconds", "Time a data provider took to answer, by provider.", ("provider",))
+M_CACHE = M.counter("meridian_cache_lookups_total", "Series lookups by where the answer came from: memory, disk, fetched, stale (provider failed; last good copy served) or error.", ("result",))
+M_CACHE_N = M.gauge("meridian_cache_series", "Series held in memory.")
+M_DISK_B = M.gauge("meridian_cache_disk_bytes", "Size of the on-disk cache.")
+M_DISK_N = M.gauge("meridian_cache_disk_files", "Files in the on-disk cache.")
+M_PRUNED = M.counter("meridian_cache_pruned_files_total", "Cache files removed by the size and age limits.")
+M_PRUNED_B = M.counter("meridian_cache_pruned_bytes_total", "Bytes removed by the cache size and age limits.")
+M_FILL = M.counter("meridian_live_fill_total", "Live-estimate attempts on a response: fill (delayed futures projected), ext (stock outside regular hours), none (nothing to add) or error.", ("outcome",))
+M_ANCHOR = M.gauge("meridian_live_anchor_age_seconds", "How old the newest real exchange print was when a live estimate was last built for this symbol (only symbols seen in the last 10 minutes).", ("symbol",))
+M_PROXY = M.gauge("meridian_proxy_last_candle_age_seconds", "Age of the newest 1-minute candle held for each Hyperliquid market used as a live proxy.", ("coin",))
+M_START = M.gauge("meridian_start_time_seconds", "When this server started, as Unix time.")
+M_START.set(time.time())
+M_CPU = M.gauge("meridian_process_cpu_seconds", "CPU time used by the server process (user + system).")
+M_RSS = M.gauge("meridian_process_max_resident_memory_bytes", "Peak resident memory of the server process.")
+M_THREADS = M.gauge("meridian_threads", "Live threads in the server process.")
+M_INFO = M.gauge("meridian_build_info", "Always 1; the labels say what is running.", ("python",))
+M_INFO.set(1, python=sys.version.split()[0])
+_anchor_seen: dict[str, tuple[float, float]] = {}  # symbol -> (when, anchor age)
 
 _mem: dict[tuple[str, str], tuple[float, dict]] = {}
 _locks: dict[tuple[str, str], threading.Lock] = {}
@@ -143,6 +168,11 @@ def _ttl(symbol: str, tf: str) -> float:
     return 1800.0
 
 
+def _provider(url: str) -> str:
+    host = urllib.parse.urlparse(url).hostname or ""
+    return "yahoo" if host.endswith("yahoo.com") else "hyperliquid" if host.endswith("hyperliquid.xyz") else "other"
+
+
 def _http_json(url: str, payload: dict | None = None):
     headers = {"User-Agent": UA, "Accept": "application/json"}
     body = None
@@ -150,8 +180,19 @@ def _http_json(url: str, payload: dict | None = None):
         headers["Content-Type"] = "application/json"
         body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        return json.loads(r.read().decode("utf-8"))
+    prov, t0, outcome = _provider(url), time.time(), "ok"
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        outcome = "throttled" if e.code == 429 else "http_error"
+        raise
+    except Exception as e:
+        outcome = "timeout" if "timed out" in str(e) or isinstance(e, TimeoutError) else "network_error"
+        raise
+    finally:
+        M_UP.inc(provider=prov, outcome=outcome)
+        M_UP_T.observe(time.time() - t0, provider=prov)
 
 
 def _round(x: float) -> float:
@@ -560,7 +601,24 @@ def splice_ext(data: dict, ext: dict, proxy: list, tf: str, coin: str | None, no
 
 
 def add_live(data: dict) -> dict:
-    """Bring a series as close to now as the free sources allow. Never raises.
+    """_add_live, counted: what kind of estimate went onto the response, and how old the newest
+    real exchange print was. Never raises: on any failure the exchange bars are returned as they are."""
+    out = _add_live(data)
+    if out is None:
+        M_FILL.inc(outcome="error")
+        return data
+    lv = out.get("live") if out is not data else None
+    if not lv:
+        M_FILL.inc(outcome="none")
+        return out
+    M_FILL.inc(outcome=lv.get("kind") or "fill")
+    if lv.get("anchorAge") is not None and (data["symbol"] in LIVE_PROXY or data["symbol"] in STOCK_PROXY):
+        _anchor_seen[data["symbol"]] = (time.time(), float(lv["anchorAge"]))
+    return out
+
+
+def _add_live(data: dict) -> dict:
+    """Bring a series as close to now as the free sources allow. Never raises; None on failure.
     Futures with a proxy: the ten delayed minutes are projected. Stocks outside regular hours: real
     extended-hours prints, with gaps projected where the stock has a proxy."""
     symbol, tf = data["symbol"], data["tf"]
@@ -597,6 +655,7 @@ def add_live(data: dict) -> dict:
             return splice_ext(data, ext, proxy, tf, coin, now)
     except Exception as e:  # the exchange bars are still good; show them
         sys.stderr.write(f"live fill failed for {symbol}: {e}\n")
+        return None  # add_live counts it and returns the exchange bars
     return data
 
 
@@ -646,11 +705,45 @@ def _prune_forever():
     while True:
         try:
             n, b = prune_cache()
+            M_PRUNED.inc(n)
+            M_PRUNED_B.inc(b)
             if n:
                 print(f"cache: removed {n} old files, {b / 1e6:.0f} MB", flush=True)
         except Exception as e:  # never take the server down over housekeeping
             print("cache prune failed:", e, flush=True)
         time.sleep(3600)
+
+
+@M.collector
+def _collect():
+    now = time.time()
+    M_CACHE_N.set(len(_mem))
+    n = b = 0
+    for dp, _, fns in os.walk(CACHE):
+        for fn in fns:
+            try:
+                b += os.path.getsize(os.path.join(dp, fn))
+                n += 1
+            except OSError:
+                pass
+    M_DISK_B.set(b)
+    M_DISK_N.set(n)
+    M_PROXY.clear()
+    for coin, (_, _, rows) in list(_proxy_cache.items()):
+        if rows:
+            M_PROXY.set(max(0.0, now - rows[-1][0]), coin=coin)
+    M_ANCHOR.clear()
+    for sym, (seen, age) in list(_anchor_seen.items()):
+        if now - seen <= 600:
+            M_ANCHOR.set(age, symbol=sym)
+    try:
+        import resource
+        ru = resource.getrusage(resource.RUSAGE_SELF)
+        M_CPU.set(ru.ru_utime + ru.ru_stime)
+        M_RSS.set(ru.ru_maxrss if sys.platform == "darwin" else ru.ru_maxrss * 1024)  # bytes on macOS, KiB on Linux
+    except Exception:
+        pass
+    M_THREADS.set(threading.active_count())
 
 
 def _disk_path(symbol: str, tf: str) -> str:
@@ -670,12 +763,14 @@ def get_bars(symbol: str, tf: str) -> dict:
     now = time.time()
     hit = _mem.get(key)
     if hit and now - hit[0] < ttl:
+        M_CACHE.inc(result="memory")
         return hit[1]
     with _locks_guard:
         lock = _locks.setdefault(key, threading.Lock())
     with lock:
         hit = _mem.get(key)
         if hit and time.time() - hit[0] < ttl:
+            M_CACHE.inc(result="memory")  # another thread fetched it while this one waited
             return hit[1]
         path = _disk_path(symbol, tf)
         disk = None
@@ -685,6 +780,7 @@ def get_bars(symbol: str, tf: str) -> dict:
                     disk = json.load(f)
                 if time.time() - disk.get("fetched", 0) < ttl:
                     _mem[key] = (disk["fetched"], disk)
+                    M_CACHE.inc(result="disk")
                     return disk
             except Exception:
                 disk = None
@@ -696,9 +792,12 @@ def get_bars(symbol: str, tf: str) -> dict:
                 stale = dict(old)
                 stale["stale"] = True
                 _mem[key] = (time.time() - ttl + 20, stale)  # retry in ~20 s
+                M_CACHE.inc(result="stale")
                 return stale
+            M_CACHE.inc(result="error")
             raise RuntimeError(str(e) or e.__class__.__name__)
         _mem[key] = (time.time(), data)
+        M_CACHE.inc(result="fetched")
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
@@ -771,6 +870,12 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
+    def send_response(self, code, message=None):
+        self._code = code
+        super().send_response(code, message)
+
+    ROUTES = {"/api/bars": "bars", "/api/batch": "batch", "/api/search": "search", "/api/health": "health", "/metrics": "metrics"}
+
     def _json(self, obj, code=200):
         body = json.dumps(obj, separators=(",", ":")).encode("utf-8")
         self.send_response(code)
@@ -780,7 +885,25 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        t0, self._code = time.time(), 0
+        path = urllib.parse.urlparse(self.path).path
+        route = self.ROUTES.get(path) or ("unknown_api" if path.startswith("/api/") else "static")
+        try:
+            return self._get()
+        finally:
+            M_HTTP.inc(route=route, code=self._code or 0)
+            M_HTTP_T.observe(time.time() - t0, route=route)
+
+    def _get(self):
         u = urllib.parse.urlparse(self.path)
+        if u.path == "/metrics":
+            body = M.render().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", M.CONTENT_TYPE)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if not u.path.startswith("/api/"):
             return super().do_GET()
         qs = urllib.parse.parse_qs(u.query)

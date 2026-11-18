@@ -29,7 +29,7 @@ npm test
 | `tests/lab.mjs` | model lab: split, embargo, no output on training bars |
 | `tests/markets.mjs` | Markets view: period changes by calendar (holidays, month ends, year to date), breadth, treemap layout (areas, bounds, no overlap), tile colors |
 | `tests/parity.mjs` | the browser port of the live fill and of the market summary rows gives the same results as the Python (cases written by `tests/make_parity.py`) |
-| `tests/test_server.py` | provider parsing: null rows, stub bars, wall-clock times, duplicate sessions, adjusted closes; market sessions; the live fill (projection maths, agreement across timeframes, market hours); the shared-site build (which series are due, across closes, weekends, holidays and a clock change) |
+| `tests/test_server.py` | provider parsing: null rows, stub bars, wall-clock times, duplicate sessions, adjusted closes; market sessions; the live fill (projection maths, agreement across timeframes, market hours); the shared-site build (which series are due, across closes, weekends, holidays and a clock change); the metrics (text format, histogram arithmetic, provider failure counting, the `/metrics` endpoint on a live local server) |
 
 ## What is in it
 
@@ -166,6 +166,35 @@ reads one small file with a year of daily closes for every symbol.
 To change the lists, edit `tools/make_universe.py` or feed it a newer constituents table and
 screener file (its docstring says where each comes from), and run it; `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
 
+## Monitoring with Prometheus
+
+The local server publishes its own health at `http://127.0.0.1:8830/metrics` in Prometheus' text
+format (`metrics.py`, standard library only). `monitoring/prometheus.yml` scrapes it and loads
+`monitoring/alerts.yml`:
+
+```bash
+brew install prometheus
+prometheus --config.file=monitoring/prometheus.yml
+```
+
+Then open http://localhost:9090. What is measured:
+
+| Metric | What it says |
+| --- | --- |
+| `meridian_upstream_requests_total{provider, outcome}` and `_duration_seconds` | every request to Yahoo and Hyperliquid: ok, throttled, http_error, timeout, network_error; and how long it took |
+| `meridian_cache_lookups_total{result}` | where each series came from: memory, disk, fetched, stale (provider failed, last good copy served), error |
+| `meridian_live_fill_total{outcome}` | live estimates put on a response: fill (delayed futures), ext (stocks outside regular hours), none, error |
+| `meridian_live_anchor_age_seconds{symbol}` | how old the newest real exchange print was when a live estimate was last built (proxied symbols, last 10 minutes) |
+| `meridian_proxy_last_candle_age_seconds{coin}` | how old the newest Hyperliquid candle is for each live proxy in use |
+| `meridian_http_requests_total{route, code}` and `_duration_seconds` | the app's own requests |
+| `meridian_cache_disk_bytes`, `_files`, `meridian_cache_series`, `meridian_cache_pruned_*` | cache size and housekeeping |
+| `meridian_process_*`, `meridian_threads`, `meridian_start_time_seconds`, `meridian_build_info` | the process |
+
+The alert rules: server down, a provider throttling or failing, stale copies being served, a live
+proxy with no recent candles, an exchange feed that has gone quiet, slow answers. The server
+listens on 127.0.0.1 only, so Prometheus must run on the same machine. The shared page has no
+server, so it has no metrics.
+
 ## Rules as text
 
 The text box above every rule builder shows the same rule the rows do; edit either.
@@ -202,10 +231,11 @@ web/js/ta.js         indicator math and registry
 web/js/auto.js       pivots, trendlines, zones, Fibonacci, candlestick and chart patterns
 web/js/chart.js      canvas chart
 web/js/data.js       fetch, cache, derived timeframes, higher-timeframe alignment
+metrics.py           Prometheus metrics registry and text format    monitoring/  scrape config, alert rules
 web/js/static.js     data backend for the shared page: snapshot + live fill in the browser
 web/js/markets.js    Markets view: breadth, heat map, sector table, movers
 web/universe.json    stock list with sectors (written by tools/make_universe.py)
-tools/snapshot.py    builds the shared site (two tiers, rolling refresh)
+tools/snapshot.py    builds the shared site (three tiers, rolling refresh)
 web/js/conditions.js rule model, evaluator and builder UI      web/js/formula.js  rules as text
 web/js/engine.js     backtest engine        web/js/sim.js   rules -> engine glue
 web/js/research.js   yearly breakdown and parameter sweep

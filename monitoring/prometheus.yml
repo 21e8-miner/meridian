@@ -1,0 +1,18 @@
+# Prometheus configuration for a local Meridian server.
+#
+#   prometheus --config.file=monitoring/prometheus.yml      (run from the repository root)
+#
+# then open http://localhost:9090. Meridian listens on 127.0.0.1 only, so Prometheus has to run on
+# the same machine. Change the port below if you start Meridian on another one.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: meridian
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8830"]

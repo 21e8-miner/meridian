@@ -1,0 +1,64 @@
+# Alert rules for Meridian (loaded by monitoring/prometheus.yml). Check with:
+#   promtool check rules monitoring/alerts.yml
+groups:
+  - name: meridian
+    rules:
+      - alert: MeridianDown
+        expr: up{job="meridian"} == 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: Meridian is not answering
+          description: Prometheus has not been able to scrape the Meridian server for two minutes.
+
+      - alert: MeridianProviderThrottled
+        expr: sum by (provider) (rate(meridian_upstream_requests_total{outcome="throttled"}[10m])) > 0.02
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "{{ $labels.provider }} is throttling Meridian"
+          description: "More than one 'too many requests' answer a minute from {{ $labels.provider }} for five minutes. Charts fall back to cached copies (marked stale)."
+
+      - alert: MeridianProviderFailing
+        expr: |
+          sum by (provider) (rate(meridian_upstream_requests_total{outcome!="ok"}[10m]))
+            / sum by (provider) (rate(meridian_upstream_requests_total[10m])) > 0.25
+          and sum by (provider) (rate(meridian_upstream_requests_total[10m])) > 0.01
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: "{{ $labels.provider }} requests are failing"
+          description: "More than a quarter of requests to {{ $labels.provider }} have failed for ten minutes ({{ $value | humanizePercentage }})."
+
+      - alert: MeridianServingStale
+        expr: rate(meridian_cache_lookups_total{result="stale"}[10m]) > 0.05
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: Meridian is serving stale copies
+          description: The data provider keeps failing, so charts are showing the last saved copy.
+
+      - alert: MeridianLiveProxyStale
+        expr: meridian_proxy_last_candle_age_seconds > 600
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: "Live proxy {{ $labels.coin }} has no recent candles"
+          description: "The newest Hyperliquid candle for {{ $labels.coin }} is over ten minutes old; it trades around the clock, so live estimates built from it are going stale."
+
+      - alert: MeridianExchangeFeedLate
+        expr: meridian_live_anchor_age_seconds > 1800
+        for: 15m
+        labels: {severity: info}
+        annotations:
+          summary: "No exchange print for {{ $labels.symbol }} in 30 minutes"
+          description: "The live estimate for {{ $labels.symbol }} is projecting from an exchange print {{ $value | humanizeDuration }} old. Expected outside trading hours and on thin pre-markets; during a session it means the delayed feed has stalled."
+
+      - alert: MeridianSlowAnswers
+        expr: |
+          histogram_quantile(0.95, sum by (le, route) (rate(meridian_http_request_duration_seconds_bucket{route=~"bars|batch"}[10m]))) > 5
+        for: 10m
+        labels: {severity: info}
+        annotations:
+          summary: "Meridian {{ $labels.route }} answers are slow"
+          description: "95th percentile answer time for {{ $labels.route }} is over five seconds."
