@@ -218,6 +218,14 @@ check("join: needs three shared days, and both sides", snap.join_daily(old, dser
 oldadj = dser(range(100, 140), [10 + i for i in range(40)], adj=[(10 + i) * 0.98 for i in range(10)] + [10 + i for i in range(10, 40)])
 ja = snap.join_daily(oldadj, new)
 check("join: an adjusted column from before the window is carried, fresh bars are their own", ja is not None and ja["a"][0] == 10 * 0.98 and ja["a"][-1] == 51 and len(ja["a"]) == len(ja["c"]))
+import make_universe as mu, tempfile, json
+with tempfile.TemporaryDirectory() as tdir:
+    pth = os.path.join(tdir, "etf.json")
+    json.dump({"data": {"data": {"rows": [{"symbol": "QVAL", "companyName": "Alpha Architect U.S. Quantitative Value ETF"}, {"symbol": "DXJ", "companyName": "WisdomTree Japan Hedged Equity Fund"},
+               {"symbol": "TAIL", "companyName": "Cambria Tail Risk ETF"}, {"symbol": "SPY", "companyName": "SPDR S&P 500 ETF Trust"}, {"symbol": "WT^X", "companyName": "WisdomTree odd listing"}]}}}, open(pth, "w"))
+    fam = mu.families_from(pth)
+check("fund families: every fund named for the issuer, odd listings left out", fam == {"WisdomTree": ["DXJ"], "Cambria": ["TAIL"], "Alpha Architect": ["QVAL"]}, str(fam))
+check("fund families are published with daily and hourly history", {"QVAL", "IVAL", "TAIL", "SYLD", "DXJ", "USFR", "BOXX"} <= set(snap.EXTENDED) and all(len(v) >= 10 for v in snap.UNIVERSE["families"].values()))
 check("broad tier: daily only, disjoint from the others, refreshed hourly", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.75)
 check("the two tiers do not overlap, and every proxied symbol is core", not set(snap.CORE) & set(snap.EXTENDED) and set(server.LIVE_PROXY) | set(server.STOCK_PROXY) <= set(snap.CORE) and len(snap.EXTENDED) > 350)
 # cache housekeeping

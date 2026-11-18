@@ -6,7 +6,7 @@ a small model lab and seasonality tables. One Python file serves it; the front e
 step and no dependencies.
 
 **Shared page:** https://21e8-miner.github.io/meridian/ — runs in the browser with no install, on
-about 2,100 symbols (every US stock over $2B, the S&P 500 with sectors, 150 ETFs, futures,
+about 2,300 symbols (every US stock over $2B, the S&P 500 with sectors, 270 ETFs, futures,
 world indexes, currencies, crypto) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
 
 ## Run
@@ -146,7 +146,7 @@ The data set has two tiers, so it can be wide without flooding the provider with
 | Tier | Symbols | History | Refreshed |
 | --- | --- | --- | --- |
 | Core | 182: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
-| Extended | 595: the rest of the S&P 500 and other followed stocks, with sectors, and about 100 more ETFs (`web/universe.json`) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
+| Extended | 711: the rest of the S&P 500 and other followed stocks, with sectors, about 100 more ETFs, and every WisdomTree, Cambria and Alpha Architect fund (each issuer has its own list in the Scanner and Markets) (`web/universe.json`) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
 | Broad | 1402: every other US-listed common stock over $2B market cap (from Nasdaq's public screener; sectors are Nasdaq's, mapped onto the GICS names, so rougher) | 10 years daily | within about an hour while the market is open. A refresh asks for the last month only and joins it onto the carried history; if the two disagree on any shared day (a split or dividend restated the history) or the history is a week old, the whole series is fetched again |
 
 A build fetches only the extended series that are due and carries the others over from the last

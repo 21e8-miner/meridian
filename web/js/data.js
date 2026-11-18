@@ -123,7 +123,11 @@ export function backend() {
 // symbols on the shared site (nothing else has data there).
 export async function universes() {
   const be = await backend(), ix = be.info();
-  if (!ix) return UNIVERSES;
+  if (!ix) {
+    // with a server any symbol works: the fixed lists, plus each fund family's whole line-up
+    const fams = (await stockSectors()).families || {};
+    return { ...UNIVERSES, ...Object.fromEntries(Object.entries(fams).filter(([, v]) => v.length).map(([k, v]) => [`${k} ETFs (${v.length})`, v])) };
+  }
   const all = ix.symbols, out = {};
   const put = (name, f) => { const list = all.filter(f).map((s) => s.symbol); if (list.length) out[`${name} (${list.length})`] = list; };
   // the lightest list first: it is what a scan starts on
@@ -132,6 +136,7 @@ export async function universes() {
   put('US stocks', (s) => s.type === 'EQUITY');
   (ix.sectors || []).forEach((name, k) => put(name, (s) => s.sector === k));
   put('ETFs', (s) => s.type === 'ETF');
+  for (const [fam, list] of Object.entries(ix.families || {})) if (list.length) out[`${fam} ETFs (${list.length})`] = list;
   put('Futures', (s) => s.type === 'FUTURE');
   put('Indexes', (s) => s.type === 'INDEX');
   put('Currencies', (s) => s.type === 'CURRENCY');

@@ -3,7 +3,7 @@
 Rebuild web/universe.json: the stock list, with sectors, that the shared page publishes and the
 Markets view groups by.
 
-    python3 tools/make_universe.py constituents.csv [screener.json]
+    python3 tools/make_universe.py constituents.csv [screener.json] [--etfs=etf_screener.json]
 
 The CSV is the public S&P 500 constituents table (columns Symbol, Security, GICS Sector, ...), as
 kept at github.com/datasets/s-and-p-500-companies. A short hand-kept list of widely followed names
@@ -15,8 +15,11 @@ stocks over BROAD_MIN_CAP that are not already listed become "broad": daily hist
 sectors are Nasdaq's own classification mapped onto the eleven GICS names, so they are rougher than
 the index members'. Without the file the previous broad list is kept.
 
-ETFS is a hand-kept list of funds with daily and hourly history. Run this again when the index
-changes; nothing else reads the input files.
+ETFS is a hand-kept list of funds with daily and hourly history. Every fund of the issuers in
+FAMILIES is added too, read from Nasdaq's public ETF list
+(https://api.nasdaq.com/api/screener/etf?tableonly=true&limit=10000&download=true) by the issuer's
+name in the fund name, and each family gets its own list in the app. Without --etfs the previous
+families are kept. Run this again when the index changes; nothing else reads the input files.
 """
 from __future__ import annotations
 
@@ -51,6 +54,8 @@ ETFS = ("XME XOP XHB XRT ITB IBB IYR VNQ KWEB FXI EWJ EWZ EWG EWU EWT EWW EWC EW
         "ICLN TAN QCLN BOTZ SOXX IGV HACK CIBR SKYY BLOK BITO IBIT FBTC ETHA ARKG ARKW JETS PAVE "
         "TQQQ SQQQ SPXL SPXS UPRO SOXS TNA TZA LABU UVXY SVXY TMF SH PSQ "
         "MTUM QUAL USMV VLUE SPLV RSP IWF IWD VUG VTV IJH IJR VB VO VOO VTI IVV SCHD VIG DGRO JEPI JEPQ QQQM OEF").split()
+# issuers whose whole US fund line-up is published, matched in the fund's name
+FAMILIES = ("WisdomTree", "Cambria", "Alpha Architect")
 BROAD_MIN_CAP = 2e9
 NASDAQ_SECTOR = {"Technology": "Information Technology", "Telecommunications": "Communication Services", "Finance": "Financials",
                  "Basic Materials": "Materials", "Consumer Discretionary": "Consumer Discretionary", "Consumer Staples": "Consumer Staples",
@@ -78,7 +83,20 @@ def broad_from(path: str, taken: set) -> dict:
     return dict(sorted(out.items()))
 
 
+def families_from(path: str) -> dict:
+    with open(path) as f:
+        data = json.load(f)["data"]
+    rows = (data.get("data") or data)["rows"]
+    out = {}
+    for fam in FAMILIES:
+        out[fam] = sorted({(r.get("symbol") or "").strip().upper() for r in rows
+                           if fam.lower() in (r.get("companyName") or "").lower() and re.fullmatch(r"[A-Z]{1,5}", (r.get("symbol") or "").strip().upper())})
+    return out
+
+
 def main():
+    opts = dict(a[2:].split("=", 1) for a in sys.argv[1:] if a.startswith("--") and "=" in a)
+    sys.argv = [a for a in sys.argv if not a.startswith("--")]
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     stocks: dict[str, int] = {}
@@ -97,7 +115,9 @@ def main():
             old = json.load(f)
     except Exception:
         old = {}
-    taken = set(stocks) | set(ETFS)
+    families = families_from(opts["etfs"]) if "etfs" in opts else (old.get("families") or {})
+    funds = sorted(set(ETFS) | {s for v in families.values() for s in v})
+    taken = set(stocks) | set(funds)
     broad = broad_from(sys.argv[2], taken) if len(sys.argv) > 2 else {k: v for k, v in (old.get("broad") or {}).items() if k not in taken}
     out = {
         "asof": time.strftime("%Y-%m-%d"),
@@ -105,12 +125,13 @@ def main():
         "index": n_index,  # how many of the stocks are index members (the rest are the hand-kept extras)
         "sp500": sorted(sp500),
         "stocks": dict(sorted(stocks.items())),
-        "etfs": sorted(ETFS),
+        "etfs": funds,
+        "families": families,  # issuer -> its funds (all also in "etfs")
         "broad": broad,  # symbol -> sector index, -1 when the source had none
     }
     with open(path, "w") as f:
         json.dump(out, f, separators=(",", ":"))
-    print(f"{len(stocks)} stocks ({n_index} index members), {len(ETFS)} funds, {len(broad)} broad -> {path}")
+    print(f"{len(stocks)} stocks ({n_index} index members), {len(funds)} funds ({', '.join(f'{k} {len(v)}' for k, v in families.items())}), {len(broad)} broad -> {path}")
 
 
 if __name__ == "__main__":

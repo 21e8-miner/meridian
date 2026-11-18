@@ -79,7 +79,7 @@ EXT_KEEP = {"1d": 2520, "1h": 1500}
 EXT_RANGE = {"1d": "10y", "1h": "1y"}
 # how old an extended series may get while the stock market is open, in seconds
 EXT_TARGET = {"1d": 30 * 60, "1h": 60 * 60}
-EXT_BUDGET = 240       # extended refreshes per build, beyond series the site does not have at all
+EXT_BUDGET = 320       # extended refreshes per build, beyond series the site does not have at all
 BROAD_KEEP = {"1d": 2520}
 BROAD_TARGET = {"1d": 60 * 60}
 BROAD_BUDGET = 400     # broad refreshes per build (each is a small request: a month of bars)
@@ -479,6 +479,8 @@ def main():
     catalog = {
         "symbols": [e for e in symbols if any(tf in KEEP for tf in e["tfs"])],
         "sectors": UNIVERSE["sectors"],
+        # fund families with a list of their own in the app: issuer -> funds published in this build
+        "families": {k: [x for x in v if x in b.info] for k, v in (UNIVERSE.get("families") or {}).items() if any(x in b.info for x in v)},
         "live": server.LIVE_PROXY,
         "stocks": server.STOCK_PROXY,
         "file": {e["symbol"]: safe(e["symbol"]) for e in symbols},
