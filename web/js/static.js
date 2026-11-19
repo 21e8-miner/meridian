@@ -372,7 +372,10 @@ export async function pack(broad = false) {
   const main = await get('', 'pack.json');
   if (!broad) return main;
   const s = { ...main.s };
+  // the broad tier's summary is on its data site, or on this one when there is no data site
+  const own = !(sites.get('').cat.shards || []).length;
   for (const base of sites.keys()) {
+    if (base === '' && !own) continue;
     try { Object.assign(s, (await get(base, 'pack-broad.json')).s); } catch { /* none there (an older build kept everything in pack.json) */ }
   }
   return { generated: main.generated, s };
