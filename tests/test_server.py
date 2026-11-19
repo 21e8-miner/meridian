@@ -175,7 +175,7 @@ check("last close holds across a daylight-saving change", snap.last_close(ets(20
 check("stock session: 09:30 until the bars settle after the close, weekdays only", snap.stock_session(mon10) and not snap.stock_session(ets(2026, 11, 16, 9, 29)) and snap.stock_session(ets(2026, 11, 16, 16, 29)) and not snap.stock_session(ets(2026, 11, 16, 16, 30)) and not snap.stock_session(ets(2026, 11, 14, 11, 0)))
 inf = float("inf")
 check("due: never fetched is always due", snap.due_score(None, "1d", mon10, True) == inf and snap.due_score(0, "1h", mon10, False) == inf)
-check("due while trading: by age against the target (30 min daily, 60 min hourly)", abs(snap.due_score(mon10 - 2700, "1d", mon10, True) - 1.5) < 1e-9 and abs(snap.due_score(mon10 - 2700, "1h", mon10, True) - 0.75) < 1e-9)
+check("due while trading: by age against the target (60 min daily and hourly, 30 min five-minute)", abs(snap.due_score(mon10 - 2700, "1d", mon10, True) - 0.75) < 1e-9 and abs(snap.due_score(mon10 - 2700, "1h", mon10, True) - 0.75) < 1e-9 and abs(snap.due_score(mon10 - 2700, "5m", mon10, True) - 1.5) < 1e-9)
 sat = ets(2026, 11, 14, 12, 0)
 check("due while shut: only a copy from before the last session settled", snap.due_score(fri16 + 1700, "1d", sat, False) >= 1 and snap.due_score(fri16 + 1900, "1d", sat, False) == 0 and snap.due_score(fri16 - 86400 * 3, "1h", sat, False) > snap.due_score(fri16 + 60, "1h", sat, False) >= 1)
 check("due on a holiday: the clock says open, but nothing trades, so nothing is refetched", snap.due_score(fri16 + 3600, "1d", mon10, False) == 0)
@@ -186,6 +186,7 @@ due, carry = snap.plan_refresh(state, keys, mon10, 2, True)
 check("plan: missing first, then the most overdue up to the budget", due == [("E", "1d"), ("E", "1h"), ("C", "1d"), ("A", "1d")], str(due))
 check("plan: everything else published is carried; the dead are in neither list", carry == [("A", "1h"), ("B", "1d"), ("B", "1h"), ("C", "1h")], str(carry))
 due0, carry0 = snap.plan_refresh(state, keys, mon10, 0, True)
+check("build order: refreshes of published series go before new ones, each in plan order", snap.published_first(due, state) == [("C", "1d"), ("A", "1d"), ("E", "1d"), ("E", "1h")] and snap.published_first([("D", "1d"), ("A", "1h")], state) == [("A", "1h"), ("D", "1d")])
 check("plan: with no budget only the missing are fetched", due0 == [("E", "1d"), ("E", "1h")] and len(carry0) == 6)
 dueS, carryS = snap.plan_refresh({k: fri16 + 3600 for k in ("A|1d", "A|1h")}, keys[:2], sat, 99, False)
 check("plan: nothing is due at the weekend once the close is in", dueS == [] and carryS == keys[:2])
@@ -207,24 +208,26 @@ def dser(days, closes, adj=None, fetched=0):
     return d
 old = dser(range(100, 140), [10 + i for i in range(40)], fetched=5)
 new = dser(range(118, 142), [10 + i for i in range(18, 39)] + [48.5, 50, 51], fetched=9)   # day 139 was still forming: restated
-j = snap.join_daily(old, new)
+j = snap.join_series(old, new)
 check("join: history before the window kept, the window taken from the fresh fetch", j is not None and j["t"][0] == 100 * 86400 and j["t"][-1] == 141 * 86400 and len(j["t"]) == 42 and j["c"][39] == 48.5 and j["c"][17] == 27 and j["fetched"] == 9 and "a" not in j)
-check("join: remembers when the history was last fetched whole", j["full"] == 5 and snap.join_daily({**old, "full": 3}, new)["full"] == 3)
+check("join: remembers when the history was last fetched whole", j["full"] == 5 and snap.join_series({**old, "full": 3}, new)["full"] == 3)
 split = dser(range(118, 142), [(10 + i) / 2 for i in range(18, 39)] + [24, 25, 25.5])
-check("join: a split (every shared close restated) means fetch it whole", snap.join_daily(old, split) is None)
+check("join: a split (every shared close restated) means fetch it whole", snap.join_series(old, split) is None)
 divd = dser(range(118, 142), [10 + i for i in range(18, 39)] + [48.5, 50, 51], adj=[(10 + i) * 0.99 for i in range(18, 39)] + [48.5, 50, 51])
-check("join: a dividend (adjustment restated) means fetch it whole", snap.join_daily(old, divd) is None)
-check("join: needs three shared days, and both sides", snap.join_daily(old, dser(range(138, 145), [48, 49, 50, 51, 52, 53, 54])) is None and snap.join_daily(dser([], []), new) is None and snap.join_daily(old, dser([], [])) is None)
+check("join: a dividend (adjustment restated) means fetch it whole", snap.join_series(old, divd) is None)
+check("join: needs three shared days, and both sides", snap.join_series(old, dser(range(138, 145), [48, 49, 50, 51, 52, 53, 54])) is None and snap.join_series(dser([], []), new) is None and snap.join_series(old, dser([], [])) is None)
 oldadj = dser(range(100, 140), [10 + i for i in range(40)], adj=[(10 + i) * 0.98 for i in range(10)] + [10 + i for i in range(10, 40)])
-ja = snap.join_daily(oldadj, new)
+ja = snap.join_series(oldadj, new)
 check("join: an adjusted column from before the window is carried, fresh bars are their own", ja is not None and ja["a"][0] == 10 * 0.98 and ja["a"][-1] == 51 and len(ja["a"]) == len(ja["c"]))
 import make_universe as mu, tempfile, json
 with tempfile.TemporaryDirectory() as tdir:
     pth = os.path.join(tdir, "etf.json")
     json.dump({"data": {"data": {"rows": [{"symbol": "QVAL", "companyName": "Alpha Architect U.S. Quantitative Value ETF"}, {"symbol": "DXJ", "companyName": "WisdomTree Japan Hedged Equity Fund"},
-               {"symbol": "TAIL", "companyName": "Cambria Tail Risk ETF"}, {"symbol": "SPY", "companyName": "SPDR S&P 500 ETF Trust"}, {"symbol": "WT^X", "companyName": "WisdomTree odd listing"}]}}}, open(pth, "w"))
+               {"symbol": "TAIL", "companyName": "Cambria Tail Risk ETF"}, {"symbol": "SPY", "companyName": "SPDR S&P 500 ETF Trust"}, {"symbol": "WT^X", "companyName": "WisdomTree odd listing"},
+               {"symbol": "XLK", "companyName": "Technology Select Sector SPDR Fund"}, {"symbol": "VGT", "companyName": "Vanguard Information Technology ETF"},
+               {"symbol": "ARKK", "companyName": "ARK Innovation ETF"}, {"symbol": "PARK", "companyName": "Benchmark Park Fund"}, {"symbol": "JEPI", "companyName": "JPMorgan Equity Premium Income ETF"}]}}}, open(pth, "w"))
     fam = mu.families_from(pth)
-check("fund families: every fund named for the issuer, odd listings left out", fam == {"WisdomTree": ["DXJ"], "Cambria": ["TAIL"], "Alpha Architect": ["QVAL"]}, str(fam))
+check("fund families: every fund named for the issuer, odd listings and look-alike names left out", fam == {"WisdomTree": ["DXJ"], "Cambria": ["TAIL"], "Alpha Architect": ["QVAL"], "Vanguard": ["VGT"], "SPDR": ["SPY", "XLK"], "ARK": ["ARKK"], "JPMorgan": ["JEPI"]}, str(fam))
 check("world sectors map onto the GICS names, unknown ones stay blank", [mu.SECTORS[mu.sector_of(x)] if mu.sector_of(x) >= 0 else None for x in ("Banks", "Electric Machinery", "Electric Power", "Real Estate Investment Trusts", "Oil & Gas Producers", "Pharmaceuticals and Biotechnology", "Industrial Transportation", "Food Producers", "Services")]
       == ["Financials", "Information Technology", "Utilities", "Real Estate", "Energy", "Health Care", "Industrials", "Consumer Staples", None])
 eq = {**pd_, "meta": {"type": "EQUITY", "currency": "JPY"}}
@@ -233,8 +236,12 @@ check("pack row: another currency is converted to dollars, pence as hundredths o
       abs(snap.pack_row(eq, fx)["dv"] - int(want / 150 + 0.5)) <= 1 and abs(snap.pack_row({**pd_, "meta": {"type": "EQUITY", "currency": "GBp"}}, fx)["dv"] - int(want * 1.25 / 100 + 0.5)) <= 1
       and snap.pack_row(eq)["dv"] == 0 and snap.pack_row({**pd_, "meta": {"type": "EQUITY", "currency": "SEK"}}, fx)["dv"] == 0 and snap.pack_row({**pd_, "meta": {"type": "EQUITY", "currency": "USD"}}, fx)["dv"] == int(want + 0.5))
 check("coins and world stocks have tiers of their own, apart from the others", not set(snap.CRYPTO) & (set(snap.CORE) | set(snap.EXTENDED) | set(snap.BROAD)) and set(snap.MKT_OF) <= set(snap.BROAD) and len(snap.CRYPTO) > 50 and len(snap.MKT_OF) > 800 and all(c in snap.FX_PAIRS for c in ("JPY", "GBP", "EUR", "HKD", "SEK", "AUD", "CAD", "INR", "CHF")) and all(p in snap.CORE for p, _ in snap.FX_PAIRS.values()))
-check("fund families are published with daily and hourly history", {"QVAL", "IVAL", "TAIL", "SYLD", "DXJ", "USFR", "BOXX"} <= set(snap.EXTENDED) and all(len(v) >= 10 for v in snap.UNIVERSE["families"].values()))
-check("broad tier: daily only, disjoint from the others, refreshed hourly", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.75)
+check("the first fund families are published at every extended timeframe", {"QVAL", "IVAL", "TAIL", "SYLD", "DXJ", "USFR", "BOXX"} <= set(snap.EXTENDED) and all(len(snap.UNIVERSE["families"][k]) >= 10 for k in mu.FULL_FAMILIES))
+fam_all = {s for v in snap.UNIVERSE["families"].values() for s in v}
+check("Vanguard and the other big issuers have lists; their busiest funds get five-minute bars, the rest daily and hourly",
+      {"Vanguard", "iShares", "SPDR", "Schwab", "Invesco"} <= set(snap.UNIVERSE["families"]) and {"VGT", "VYM", "VHT", "VT"} <= set(snap.EXTENDED) | set(snap.CORE)
+      and len(snap.UNIVERSE["families"]["Vanguard"]) >= 90 and len(fam_all & (set(snap.CORE) | set(snap.EXTENDED) | set(snap.BROAD))) >= 0.85 * len(fam_all))
+check("broad tier: daily and hourly, disjoint from the others, refreshed less often", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d", "1h"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.5)
 check("the two tiers do not overlap, and every proxied symbol is core", not set(snap.CORE) & set(snap.EXTENDED) and set(server.LIVE_PROXY) | set(server.STOCK_PROXY) <= set(snap.CORE) and len(snap.EXTENDED) > 350)
 # cache housekeeping
 import tempfile
@@ -326,7 +333,41 @@ ser = {"symbol": "S", "tf": "1d", "t": [86400 * d for d in (100, 101, 104, 105, 
 enc = snap.encode_series(ser); dec = snap.decode_series(json.loads(json.dumps(enc)))
 check("format: bar times as gaps in days, adjustment as factor runs, decoded exactly where it can be", enc["t0"] == 8640000 and enc["dt"] == [1, 3, 1, 1] and "t" not in enc and enc["af"] == [[0, 0.99], [3, 1.0]] and dec["t"] == ser["t"] and all(abs(x - y) <= 2e-5 * y for x, y in zip(dec["a"], ser["a"])) and dec["fetched"] == 7 and snap.encode_series(dec) == enc)
 odd = {**ser, "tf": "1h", "t": [0, 3600, 5400, 9000, 12600]}
-check("format: times off the bar grid are published as they are", snap.encode_series(odd)["t"] == odd["t"] and snap.decode_series(snap.encode_series(odd))["t"] == odd["t"])
+eo = snap.encode_series(odd)
+check("format: hourly bars on a half-hour grid (a 9:30 open) use half-hour steps, exactly", eo["step"] == 1800 and eo["dt"] == [2, 1, 2, 2] and snap.decode_series(eo)["t"] == odd["t"])
+ragged = {**ser, "tf": "1h", "t": [0, 3600, 3661, 7200, 10800]}
+check("format: times off any grid still round-trip (one-second steps)", snap.encode_series(ragged)["step"] == 1 and snap.decode_series(snap.encode_series(ragged))["t"] == ragged["t"])
+back = {**ser, "t": [0, 3600, 3600, 7200, 10800]}
+check("format: times that do not rise are published as they are", snap.encode_series(back)["t"] == back["t"])
 check("format: a plain file passes through decoding unchanged", snap.decode_series(ser) is ser and snap.decode_series(None) is None)
-check("broad tier keeps five years of daily bars", snap.BROAD_KEEP == {"1d": 1260} and snap.BROAD_RANGE == {"1d": "5y"})
+check("broad tier keeps ten years of daily bars and eight months of hourly", snap.BROAD_KEEP == {"1d": 2520, "1h": 1200} and snap.BROAD_RANGE == {"1d": "10y", "1h": "1y"})
+check("extended tier and coins have five-minute bars too (15m and 30m are built from them)", snap.EXT_KEEP["5m"] > 1000 and snap.EXT_RANGE["5m"] == "1mo" and "5m" in snap.EXT_TARGET and "5m" in snap.JOIN_RANGE)
+check("a split data set publishes the broad tier's daily history on the data site and its hourly on the main one",
+      snap.BROAD_PART["broad"] == ("1d",) and snap.BROAD_PART["main"] == ("1h",) and set(snap.BROAD_PART["all"]) == set(snap.BROAD_KEEP))
+check("history range: files from before it was recorded count as five years (broad daily) or the current window",
+      snap.history_range({"tf": "1d"}, 3) == "5y" and snap.history_range({"tf": "1h"}, 3) == "1y" and snap.history_range({"tf": "1d"}, 2) == "10y" and snap.history_range({"tf": "1d", "rng": "10y"}, 3) == "10y")
+# joining works for intraday bars too, and remembers how far back the history went
+def hser(hours, closes, fetched=0):
+    return {"symbol": "X", "tf": "1h", "t": [x * 3600 for x in hours], "o": list(closes), "h": list(closes), "l": list(closes), "c": list(closes), "v": [1] * len(hours), "meta": {}, "fetched": fetched}
+jh = snap.join_series({**hser(range(0, 50), [float(i) for i in range(50)], 4), "rng": "1y", "full": 4}, hser(range(40, 55), [float(i) for i in range(40, 49)] + [49.5] + [float(i) for i in range(50, 55)], 8))
+check("join: hourly bars join like days; the range of the whole fetch is kept", jh is not None and len(jh["t"]) == 55 and jh["c"][49] == 49.5 and jh["rng"] == "1y" and jh["full"] == 4 and jh["fetched"] == 8)
+import time
+# a refresh fetches the whole series again when the carried one does not reach as far back as is kept
+with tempfile.TemporaryDirectory() as tdir:
+    prevd, outd = os.path.join(tdir, "prev"), os.path.join(tdir, "out")
+    os.makedirs(os.path.join(prevd, "data", "1d")); os.makedirs(os.path.join(outd, "data", "1d"))
+    asked = []
+    fresh = lambda rng: {**dser(range(118, 142), [10 + i for i in range(18, 39)] + [48.5, 50, 51], fetched=int(time.time())), "symbol": "ZZQ", "meta": {"type": "EQUITY"}}
+    bld = snap.Build(outd, None, 9, prevd)
+    bld.yahoo = lambda sym, tf, rng=None, tries=4: asked.append(rng) or fresh(rng)
+    snap.TIER["ZZQ"] = (3, snap.BROAD_KEEP)
+    for rng_kept, want in ((None, "10y"), ("10y", "1mo")):
+        carried = {**old, "symbol": "ZZQ", "full": int(time.time()) - 60, "meta": {"type": "EQUITY"}}
+        if rng_kept: carried["rng"] = rng_kept
+        json.dump(snap.encode_series(carried), open(os.path.join(prevd, "data", "1d", "ZZQ.json"), "w"))
+        asked.clear(); res = bld.refresh(("ZZQ", "1d"))
+        check(f"refresh: carried broad daily history fetched as {rng_kept or 'five years'} -> asks for {want}", res[2] == "fresh" and asked == [want], str((res, asked)))
+    written = snap.decode_series(json.load(open(os.path.join(outd, "data", "1d", "ZZQ.json"))))
+    check("refresh: a joined series keeps the range its history was fetched with", written.get("rng") == "10y")
+    snap.TIER.pop("ZZQ")
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)

@@ -234,8 +234,10 @@ export async function proxyMinutes(coin, startS) {
 // the list itself (data/catalog.json) is fetched again only when that changes.
 // The data set can live on more than one site (tools/snapshot.py --part): this page's own, plus
 // the "shards" its catalog names, each with its own stamp, catalog and files. They are merged into
-// one index; a symbol remembers which site (`base`) its files are on. A shard that cannot be read
-// leaves its symbols out (or keeps the copy read before) and the rest of the page works.
+// one index. A symbol can have some timeframes on one site and the rest on another (the broad
+// tier's daily history on the data site, its hourly here): it remembers which site has each
+// (`bases`, timeframe -> site). A shard that cannot be read leaves its files out (or keeps the copy
+// read before) and the rest of the page works.
 let index = null, indexAt = 0, hlNames = null;
 const sites = new Map(); // base ('' = this site) -> { id, generated, cat }
 const files = new Map(); // "tf|SYM" -> { g, data }
@@ -248,15 +250,38 @@ async function readSite(base) {
   sites.set(base, { id: st.catalog, generated: st.generated, cat });
   return changed;
 }
-function merge() {
-  const main = sites.get('').cat, ix = { ...main, symbols: [], file: {}, families: { ...(main.families || {}) }, indexes: { ...(main.indexes || {}) } };
-  for (const [base, site] of sites) {
-    for (const e of site.cat.symbols) { if (base && ix.file[e.symbol]) continue; ix.symbols.push(base ? { ...e, base } : e); ix.file[e.symbol] = site.cat.file[e.symbol]; }
-    if (base) { Object.assign(ix.families, site.cat.families || {}); Object.assign(ix.indexes, site.cat.indexes || {}); }
+const TF_ORDER = ['1m', '5m', '1h', '1d', 'x1m'];
+// Catalogs of several sites -> one index. `list` is [[base, catalog]], this page's own first: where
+// two sites have the same timeframe of a symbol, the first one's is used. Exported for tests.
+export function mergeSites(list) {
+  const main = list[0][1], ix = { ...main, symbols: [], file: {}, families: {}, indexes: {} };
+  const by = new Map();
+  for (const [base, cat] of list) {
+    for (const e of cat.symbols) {
+      const have = by.get(e.symbol);
+      if (!have) {
+        const x = { ...e, tfs: [...e.tfs], bases: Object.fromEntries(e.tfs.map((tf) => [tf, base])) };
+        by.set(e.symbol, x); ix.symbols.push(x); ix.file[e.symbol] = cat.file[e.symbol];
+        continue;
+      }
+      for (const tf of e.tfs) if (!(tf in have.bases)) { have.bases[tf] = base; have.tfs.push(tf); }
+      have.tfs.sort((a, b) => TF_ORDER.indexOf(a) - TF_ORDER.indexOf(b));
+      if (have.sector == null && e.sector != null) have.sector = e.sector;
+    }
+    // lists (fund families, world indexes) are the union of what each site publishes
+    for (const key of ['families', 'indexes']) {
+      for (const [name, v] of Object.entries(cat[key] || {})) {
+        const cur = ix[key][name], members = (key === 'families' ? v : v.members) || [];
+        if (!cur) { ix[key][name] = key === 'families' ? [...members] : { ...v, members: [...members] }; continue; }
+        const into = key === 'families' ? cur : cur.members, seen = new Set(into);
+        for (const m of members) if (!seen.has(m)) into.push(m);
+      }
+    }
   }
-  ix.by = new Map(ix.symbols.map((s) => [s.symbol, s]));
+  ix.by = by;
   return ix;
 }
+const merge = () => mergeSites([...sites].map(([base, site]) => [base, site.cat]));
 async function loadIndex(force = false) {
   if (index && !force && Date.now() - indexAt < 60000) return index;
   try {
@@ -270,7 +295,11 @@ async function loadIndex(force = false) {
   return index;
 }
 // what a symbol has on the shared page, in words: 'daily and hourly history', 'daily history'
-export const kept = (tfs) => `${tfs.filter((t) => t === '1d' || t === '1h').map((t) => (t === '1d' ? 'daily' : 'hourly')).join(' and ')} history`;
+const WORD = { '1d': 'daily', '1h': 'hourly', '5m': 'five-minute' };
+export const kept = (tfs) => {
+  const w = ['1d', '1h', '5m'].filter((t) => tfs.includes(t)).map((t) => WORD[t]);
+  return `${w.length > 1 ? w.slice(0, -1).join(', ') + ' and ' + w[w.length - 1] : w[0] || 'no'} history`;
+};
 // The published file format (tools/snapshot.py: encode_series): bar times as gaps in bar steps,
 // the adjusted close as runs of a factor. Plain files pass through unchanged.
 export function decodeSeries(d) {
@@ -287,12 +316,13 @@ export function decodeSeries(d) {
 }
 async function loadFile(tf, symbol) {
   const ix = await loadIndex(), key = tf + '|' + symbol, hit = files.get(key), e = ix.by.get(symbol);
-  if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} has ${kept(e.tfs)} on the shared page; shorter timeframes are kept for the core symbols` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
+  if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} has ${kept(e.tfs)} on the shared page; shorter timeframes are kept for the most traded symbols` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
   if (hit && hit.g === ix.generated) return hit.p || hit.data;
   // core files change with every build; the rest change a few times an hour at most, so they are
   // left to the browser's own cache (the site serves them as fresh for ten minutes)
   const g = ix.generated; // the build this request belongs to: the index object is updated in place
-  const p = fetch(`${e.base || ''}data/${tf}/${ix.file[symbol]}.json${e.tier === 1 || !e.tier ? `?g=${g}` : ''}`).then((r) => { if (!r.ok) throw new Error(`${symbol}: no ${tf} data in the shared set`); return r.json(); }).then(decodeSeries);
+  const base = (e.bases && e.bases[tf]) ?? e.base ?? '';
+  const p = fetch(`${base}data/${tf}/${ix.file[symbol]}.json${e.tier === 1 || !e.tier ? `?g=${g}` : ''}`).then((r) => { if (!r.ok) throw new Error(`${symbol}: no ${tf} data in the shared set`); return r.json(); }).then(decodeSeries);
   files.set(key, { g, p }); // callers that arrive while it loads share the one request
   const mine = () => { const cur = files.get(key); return cur && cur.p === p; }; // not replaced by a newer build's request
   try { const data = await p; if (mine()) files.set(key, { g, data }); return data; }

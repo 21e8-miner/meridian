@@ -8,19 +8,21 @@ Markets view groups by.
 
 The CSV is the public S&P 500 constituents table (columns Symbol, Security, GICS Sector, ...), as
 kept at github.com/datasets/s-and-p-500-companies. A short hand-kept list of widely followed names
-outside the index is added. Those are the "stocks": daily and hourly history on the shared page.
+outside the index is added. Those are the "stocks": daily, hourly and five-minute history on the
+shared page.
 
 screener.json is Nasdaq's public list of US-listed stocks
 (https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&download=true). Common
-stocks over BROAD_MIN_CAP that are not already listed become "broad": daily history only. Their
+stocks over BROAD_MIN_CAP that are not already listed become "broad": daily and hourly history. Their
 sectors are Nasdaq's own classification mapped onto the eleven GICS names, so they are rougher than
 the index members'. Without the file the previous broad list is kept.
 
-ETFS is a hand-kept list of funds with daily and hourly history. Every fund of the issuers in
-FAMILIES is added too, read from Nasdaq's public ETF list
+ETFS is a hand-kept list of funds published like the followed stocks ("etfs"), with every ETF that
+trades at least EXT_ETF_DV a day (needs --liquidity) and every fund of FULL_FAMILIES. The funds of
+each issuer in FAMILIES are read from Nasdaq's public ETF list
 (https://api.nasdaq.com/api/screener/etf?tableonly=true&limit=10000&download=true) by the issuer's
-name in the fund name, and each family gets its own list in the app. Without --etfs the previous
-families are kept.
+name in the fund name, and each family gets its own list in the app; its funds that trade at all
+and are not in "etfs" are in "broad". Without --etfs the previous families are kept.
 
 --liquidity is the output of tools/liquidity_probe.py: each candidate's average dollar volume over
 its last 20 sessions. With it, "broad" also takes smaller stocks (market cap from SMALL_MIN_CAP)
@@ -66,11 +68,26 @@ ETFS = ("XME XOP XHB XRT ITB IBB IYR VNQ KWEB FXI EWJ EWZ EWG EWU EWT EWW EWC EW
         "TQQQ SQQQ SPXL SPXS UPRO SOXS TNA TZA LABU UVXY SVXY TMF SH PSQ "
         "MTUM QUAL USMV VLUE SPLV RSP IWF IWD VUG VTV IJH IJR VB VO VOO VTI IVV SCHD VIG DGRO JEPI JEPQ QQQM OEF").split()
 # issuers whose whole US fund line-up is published, matched in the fund's name
-FAMILIES = ("WisdomTree", "Cambria", "Alpha Architect")
+# issuer -> how its funds are named. Each family gets a list of its own in the app; the first three
+# (FULL_FAMILIES) are published at every extended timeframe whatever they trade, the others go by
+# how much each fund trades like any other ETF.
+FAMILIES = {
+    "WisdomTree": r"\bWisdomTree\b", "Cambria": r"\bCambria\b", "Alpha Architect": r"\bAlpha Architect\b",
+    "Vanguard": r"^Vanguard\b", "iShares": r"\biShares\b", "SPDR": r"\bSPDR\b", "Schwab": r"^Schwab\b",
+    "Invesco": r"^Invesco\b", "First Trust": r"^First Trust\b", "ProShares": r"^ProShares\b", "Direxion": r"^Direxion\b",
+    "Global X": r"^Global X\b", "ARK": r"^ARK\b", "JPMorgan": r"^J\.?P\.? ?Morgan\b", "Dimensional": r"^Dimensional\b",
+    "Fidelity": r"^Fidelity\b", "Avantis": r"\bAvantis\b", "VanEck": r"^VanEck\b", "Pacer": r"^Pacer\b",
+    "Franklin": r"^Franklin\b", "Goldman Sachs": r"^Goldman Sachs\b", "Xtrackers": r"^Xtrackers\b", "Capital Group": r"^Capital Group\b",
+    "PIMCO": r"^PIMCO\b", "Innovator": r"^Innovator\b", "Roundhill": r"^Roundhill\b", "Defiance": r"^Defiance\b",
+    "YieldMax": r"\bYieldMax\b", "Simplify": r"^Simplify\b", "Amplify": r"^Amplify\b", "KraneShares": r"^KraneShares\b",
+    "GraniteShares": r"^GraniteShares\b", "T. Rowe Price": r"^T\. ?Rowe Price\b", "Grayscale": r"^Grayscale\b",
+}
+FULL_FAMILIES = ("WisdomTree", "Cambria", "Alpha Architect")
+EXT_ETF_DV = 5e7       # ETFs that trade this much a day get every extended timeframe (5-minute bars)
 BROAD_MIN_CAP = 2e9    # US stocks this big are always included
 SMALL_MIN_CAP = 2e8    # smaller ones, from this size, only if they trade enough (needs --liquidity)
-STOCK_MIN_DV = 5e6     # dollars traded a day, 20-session average
-ETF_MIN_DV = 2e6
+STOCK_MIN_DV = 1e6     # dollars traded a day, 20-session average
+ETF_MIN_DV = 2.5e5
 COIN_MIN_DV = 1e6      # crypto volume comes in dollars
 # Sector names used abroad (ICB, the exchanges' own, Wikipedia's wording) -> the GICS eleven, first
 # match wins. Anything that matches none is left without a sector.
@@ -143,10 +160,11 @@ def families_from(path: str) -> dict:
         data = json.load(f)["data"]
     rows = (data.get("data") or data)["rows"]
     out = {}
-    for fam in FAMILIES:
+    for fam, pat in FAMILIES.items():
+        rx = re.compile(pat, re.I)
         out[fam] = sorted({(r.get("symbol") or "").strip().upper() for r in rows
-                           if fam.lower() in (r.get("companyName") or "").lower() and re.fullmatch(r"[A-Z]{1,5}", (r.get("symbol") or "").strip().upper())})
-    return out
+                           if rx.search((r.get("companyName") or "").strip()) and re.fullmatch(r"[A-Z]{1,5}", (r.get("symbol") or "").strip().upper())})
+    return {k: v for k, v in out.items() if v}
 
 
 def main():
@@ -171,16 +189,24 @@ def main():
     except Exception:
         old = {}
     families = families_from(opts["etfs"]) if "etfs" in opts else (old.get("families") or {})
-    funds = sorted(set(ETFS) | {s for v in families.values() for s in v})
-    taken = set(stocks) | set(funds)
     liq = None
     if "liquidity" in opts:
         with open(opts["liquidity"]) as f:
             liq = json.load(f)
+    funds = sorted(set(ETFS) | {s for k in FULL_FAMILIES for s in families.get(k, [])}
+                   | {s for s, m in (liq or {}).items() if m.get("type") == "ETF" and not m.get("gone") and m.get("dv", 0) >= EXT_ETF_DV and re.fullmatch(r"[A-Z]{1,5}", s)})
+    if liq is None:
+        funds = sorted(set(funds) | set(old.get("etfs") or []))  # without the volumes, keep who was promoted before
+    taken = set(stocks) | set(funds)
     broad = broad_from(sys.argv[2], taken, liq) if len(sys.argv) > 2 else {k: v for k, v in (old.get("broad") or {}).items() if k not in taken}
     if liq is not None and "etfs" in opts:
         for sym in etfs_from(opts["etfs"], taken | set(broad), liq):
             broad[sym] = -1  # funds have no sector
+        # every fund of a listed family that still trades, however little
+        for sym in {s for v in families.values() for s in v} - taken - set(broad):
+            m = liq.get(sym) or {}
+            if m.get("type") == "ETF" and not m.get("gone") and m.get("dv", 0) > 0:
+                broad[sym] = -1
         broad = dict(sorted(broad.items()))
     intl, crypto = old.get("intl") or {}, old.get("crypto") or []
     if "intl" in opts and "checked" in opts:
@@ -205,7 +231,7 @@ def main():
         "sp500": sorted(sp500),
         "stocks": dict(sorted(stocks.items())),
         "etfs": funds,
-        "families": families,  # issuer -> its funds (all also in "etfs")
+        "families": families,  # issuer -> its funds (each in "etfs" or "broad", if it trades)
         "broad": broad,  # symbol -> sector index, -1 when the source had none (and for funds)
         "intl": intl,  # index -> {country, members: {symbol: sector index or -1}}
         "crypto": crypto,  # Yahoo tickers of the coins kept, largest first

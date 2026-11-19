@@ -147,7 +147,7 @@ export async function universes() {
   return out;
 }
 // Which timeframes can be charted for a symbol: null means all of them (always, with a server).
-// On the shared page most stocks have daily and hourly history only.
+// On the shared page most symbols have no timeframe shorter than an hour or five minutes.
 export async function availableTfs(symbol) {
   const be = await backend();
   if (!be.tfs) return null;

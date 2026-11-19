@@ -11,19 +11,21 @@ Two tiers, so the data set can be wide without hammering the provider:
 
   core      every timeframe (1m, 5m, 1h, daily), fetched fresh on every build. Everything with a
             live proxy, plus the main futures, ETFs, indexes, currencies, crypto and mega caps.
-  extended  daily and hourly history for the S&P 500, other followed stocks and a list of funds
-            (web/universe.json). A build
+  extended  daily, hourly and five-minute history for the S&P 500, other followed stocks, the
+            most traded funds and coins (web/universe.json). A build
             refreshes only the series that are due, oldest first, up to a fixed number of requests,
             and carries the others over from the previous build: a local copy of it (--prev, what
             the scheduled job uses: it downloads the last published build) or, failing that, the
             published site itself (--site). So each series is refreshed about twice an hour while
             the market is open, once after the close, and not at all overnight, at the weekend or
             on a holiday, when it cannot change.
-  broad     daily history only, for the other US stocks over $2B, smaller ones and other ETFs that
-            trade enough (web/universe.json "broad"; see tools/make_universe.py).
-            Refreshed the same way, about once an hour while the market is open. A refresh asks for
-            the last month only and joins it onto the carried history, unless that history no longer
-            matches (a split or a dividend restates it), in which case the whole series is fetched.
+  broad     daily (ten years) and hourly history, for the other US stocks over $2B, smaller ones,
+            other ETFs that trade enough and the members of world indexes (web/universe.json
+            "broad" and "intl"; see tools/make_universe.py). Refreshed the same way, less often.
+
+A refresh asks for the last few bars only and joins them onto the carried history, unless that
+history no longer matches (a split or a dividend restates it), is a week old, or does not reach as
+far back as is now kept; then the whole series is fetched.
 
     python3 tools/snapshot.py _site                          # full build
     python3 tools/snapshot.py _site NQ=F SPY --ext=KO,PEP --broad=AAL,ACM   # just these (for testing)
@@ -31,14 +33,16 @@ Two tiers, so the data set can be wide without hammering the provider:
 
 The data set can be split across sites, each with its own size limit (GitHub Pages: 1 GB):
 
-    --part=main  --shard=URL   everything but the broad tier; the page also reads the site at URL
-    --part=broad               the broad tier only, as a data site of its own (no app)
+    --part=main  --shard=URL   everything but the broad tier's daily history; the page also reads
+                               the site(s) at URL, and takes each timeframe from whichever has it
+    --part=broad               the broad tier's daily history only, as a data site of its own (no app)
 
 The default, --part=all, builds one site with everything.
 """
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import json
 import os
@@ -90,16 +94,20 @@ SP500 = set(UNIVERSE.get("sp500") or [])
 # timeframe -> how many of the most recent bars to keep (15m and 30m are built from 5m in the page)
 KEEP = {"1m": 1500, "5m": 3200, "1h": 3000, "1d": 2520}
 CORE_RANGE = {"1d": "10y"}  # ask for what is kept, not the provider's default window
-EXT_KEEP = {"1d": 2520, "1h": 1500}
-EXT_RANGE = {"1d": "10y", "1h": "1y"}
+EXT_KEEP = {"1d": 2520, "1h": 1500, "5m": 1560}  # ten years, ten months, four weeks
+EXT_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo"}
 # how old an extended series may get while the stock market is open, in seconds
-EXT_TARGET = {"1d": 30 * 60, "1h": 60 * 60}
-EXT_BUDGET = 320       # extended refreshes per build, beyond series the site does not have at all
-BROAD_KEEP = {"1d": 1260}  # five years: the broad tier is the least traded, and the biggest
-BROAD_RANGE = {"1d": "5y"}
-BROAD_TARGET = {"1d": 60 * 60}
-BROAD_BUDGET = 700     # broad refreshes per build (each is a small request: a month of bars)
-CRYPTO_BUDGET = 120    # coin refreshes per build
+EXT_TARGET = {"1d": 60 * 60, "1h": 60 * 60, "5m": 30 * 60}
+EXT_BUDGET = 800       # extended refreshes per build, beyond series the site does not have at all
+BROAD_KEEP = {"1d": 2520, "1h": 1200}  # ten years of days, eight months of hours
+BROAD_RANGE = {"1d": "10y", "1h": "1y"}
+BROAD_TARGET = {"1d": 90 * 60, "1h": 120 * 60}  # the least traded and the biggest tier: refreshed less often
+BROAD_BUDGET = 1000    # broad refreshes per build (each is a small request: the last few bars)
+# Which of the broad tier's timeframes each part of a split data set publishes (see --part)
+BROAD_PART = {"all": ("1d", "1h"), "main": ("1h",), "broad": ("1d",)}
+# how much a refresh asks for, to join onto the carried history
+JOIN_RANGE = {"1d": "1mo", "1h": "5d", "5m": "5d"}
+CRYPTO_BUDGET = 200    # coin refreshes per build
 # currency -> its value in US dollars, from these core pairs (True: the pair is quoted as USD per unit)
 FX_PAIRS = {"EUR": ("EURUSD=X", True), "GBP": ("GBPUSD=X", True), "AUD": ("AUDUSD=X", True), "NZD": ("NZDUSD=X", True),
             "JPY": ("USDJPY=X", False), "CAD": ("USDCAD=X", False), "CHF": ("USDCHF=X", False), "INR": ("USDINR=X", False),
@@ -108,6 +116,7 @@ FX_PAIRS = {"EUR": ("EURUSD=X", True), "GBP": ("GBPUSD=X", True), "AUD": ("AUDUS
 SUBUNIT = {"GBp": ("GBP", 0.01), "GBX": ("GBP", 0.01), "ZAc": ("ZAR", 0.01), "ILA": ("ILS", 0.01)}  # quoted in hundredths
 FULL_EVERY = 7 * 86400  # a joined-up series is fetched whole again after this long, whatever it looks like
 SETTLE = 30 * 60       # a day's last bars are final this long after the close
+SITE_LIMIT = 980e6     # bytes of data a site may publish (GitHub Pages: 1 GB, app included)
 DEADLINE = 330         # seconds into the build after which no new extended refresh starts
 THROTTLE_STOP = 12     # "too many requests" answers after which extended refreshes stop
 RETRY_DEAD = 6 * 3600  # a symbol the provider has no data for is asked about again this much later
@@ -169,11 +178,12 @@ def plan_refresh(state: dict, keys: list, now: float, budget: int, trading: bool
     return due, [k for k in keys if k not in chosen and k not in dead]
 
 
-def join_daily(old: dict, new: dict) -> dict | None:
-    """Carried daily history + a recent window of fresh bars -> one series, or None when they do not
-    agree on the days both have (a split or a dividend has restated the history since: fetch it
-    whole). Compared: the close and the dividend adjustment (adjusted / close) on every shared day
-    but each side's newest, which may still have been forming. At least three such days are needed."""
+def join_series(old: dict, new: dict) -> dict | None:
+    """Carried history + a recent window of fresh bars -> one series, or None when they do not
+    agree on the bars both have (a split or a dividend has restated the history since: fetch it
+    whole). Compared: the close and the dividend adjustment (adjusted / close) on every shared bar
+    but each side's newest, which may still have been forming. At least three such bars are needed.
+    Any timeframe: intraday series have no adjusted close, so only their closes are compared."""
     if not old.get("t") or not new.get("t"):
         return None
     at = {t: i for i, t in enumerate(old["t"])}
@@ -199,7 +209,24 @@ def join_daily(old: dict, new: dict) -> dict | None:
     if any(abs(x - y) > 1e-9 for x, y in zip(a, out["c"])):
         out["a"] = a
     out["full"] = old.get("full") or old.get("fetched", 0)  # when the history was last fetched whole
+    if old.get("rng"):
+        out["rng"] = old["rng"]  # and how far back that fetch went
     return out
+
+
+
+def history_range(d: dict, tier: int) -> str:
+    """How far back a carried series was fetched. Files written before this was recorded are taken
+    to be what was kept then: five years of days for the broad tier, the current window otherwise."""
+    if d.get("rng"):
+        return d["rng"]
+    return "5y" if tier == 3 and d.get("tf") == "1d" else (BROAD_RANGE if tier == 3 else EXT_RANGE).get(d.get("tf"), "")
+
+
+def published_first(due: list, state: dict) -> list:
+    """Series the last build published, then the others, each in the order given."""
+    pub = [k for k in due if state.get(f"{k[0]}|{k[1]}", 0) > 0]
+    return pub + [k for k in due if state.get(f"{k[0]}|{k[1]}", 0) <= 0]
 
 
 # ───────────────────────── the published file format (pure) ─────────────────────────
@@ -210,7 +237,7 @@ STEP = {"1m": 60, "x1m": 60, "5m": 300, "1h": 3600, "1d": 86400}
 def encode_series(d: dict) -> dict:
     """A series as published: about a third smaller than plain columns, decoded by the page
     (web/js/static.js: decodeSeries) and by decode_series here, exactly.
-      t   -> t0 + dt, the gaps in bar steps (a day, an hour, ...), when every gap is whole
+      t   -> t0 + dt, the gaps in steps: the largest time that divides every gap (a day, an hour, ...)
       a   -> af, runs of [first bar, factor] with a = round(c * factor). The factor only changes
              at a dividend, but the provider rounds the column its own way, so a run is kept
              while it reproduces every adjusted close within AF_TOL (a fraction of a cent);
@@ -219,9 +246,16 @@ def encode_series(d: dict) -> dict:
     if not d or not d.get("t"):
         return d
     out = {k: v for k, v in d.items() if k not in COLS}
-    t, step = d["t"], STEP.get(d.get("tf"))
-    if step and all((t[i] - t[i - 1]) % step == 0 and t[i] > t[i - 1] for i in range(1, len(t))):
-        out["t0"], out["step"], out["dt"] = t[0], step, [(t[i] - t[i - 1]) // step for i in range(1, len(t))]
+    t = d["t"]
+    gaps = [t[i] - t[i - 1] for i in range(1, len(t))]
+    if all(g > 0 for g in gaps):
+        # the step is the largest that divides every gap: an hour for hourly bars that start on the
+        # hour, half an hour for a market that opens at 9:30, a second at worst
+        step = 0
+        for g in gaps:
+            step = math.gcd(step, g)
+        step = step or STEP.get(d.get("tf")) or 1
+        out["t0"], out["step"], out["dt"] = t[0], step, [g // step for g in gaps]
     else:
         out["t"] = t
     for col in "ohlcv":
@@ -306,7 +340,7 @@ class Build:
         self.pack: dict[str, dict] = {}
         self.notes: list[str] = []
         self.fx: dict[str, float] = {}   # currency -> US dollars, read from the core pairs once they are in
-        self.joined = 0                   # daily refreshes done by joining a month onto the carried history
+        self.joined = 0                   # refreshes done by joining the last few bars onto the carried history
 
     def path(self, tf: str, symbol: str) -> str:
         return os.path.join(self.out, "data", tf, safe(symbol) + ".json")
@@ -433,22 +467,23 @@ class Build:
         if time.time() - self.t0 > DEADLINE or self.throttled >= THROTTLE_STOP:
             return symbol, tf, None
         tier, keep = TIER.get(symbol, (2, EXT_KEEP))
+        want = (BROAD_RANGE if tier == 3 else EXT_RANGE)[tf]
         try:
-            if tf == "1d":
-                # daily: a month of fresh bars joined onto the carried history, when they agree
-                try:
-                    old = self.previous_series("1d", symbol)
-                except Unreachable:
-                    old = None
-                if old and time.time() - (old.get("full") or old.get("fetched") or 0) < FULL_EVERY:
-                    joined = join_daily(old, self.yahoo(symbol, "1d", "1mo", tries=2))
-                    if joined:
-                        self.write(joined, tier, keep[tf], True)
-                        with self.lock:
-                            self.joined += 1
-                        return symbol, tf, "fresh"
-            d = self.yahoo(symbol, tf, (BROAD_RANGE if tier == 3 else EXT_RANGE)[tf], tries=2)
-            d["full"] = d.get("fetched", 0)
+            # the last few bars joined onto the carried history, when they agree and that history
+            # was fetched whole recently enough and as far back as is now kept
+            try:
+                old = self.previous_series(tf, symbol)
+            except Unreachable:
+                old = None
+            if old and time.time() - (old.get("full") or old.get("fetched") or 0) < FULL_EVERY and history_range(old, tier) == want:
+                joined = join_series(old, self.yahoo(symbol, tf, JOIN_RANGE[tf], tries=2))
+                if joined:
+                    self.write(joined, tier, keep[tf], True)
+                    with self.lock:
+                        self.joined += 1
+                    return symbol, tf, "fresh"
+            d = self.yahoo(symbol, tf, want, tries=2)
+            d["full"], d["rng"] = d.get("fetched", 0), want
             self.write(d, tier, keep[tf], True)
             return symbol, tf, "fresh"
         except Exception as e:
@@ -510,8 +545,6 @@ def main():
     extended, broad, crypto = pick("ext", EXTENDED), pick("broad", BROAD), pick("crypto", CRYPTO)
     if part == "broad":
         core, extended, crypto = [], [], []
-    elif part == "main":
-        broad = []
     shards = [u if u.endswith("/") else u + "/" for u in (opts.get("shard") or "").split(",") if u] if part == "main" else []
     TIER.update({s: (2, EXT_KEEP) for s in extended + crypto})
     TIER.update({s: (3, BROAD_KEEP) for s in broad})
@@ -565,7 +598,7 @@ def main():
     # extended and broad: refresh what is due, carry the rest from the previous build
     keysc = [(s, tf) for s in crypto for tf in EXT_KEEP]
     keys2 = [(s, tf) for s in extended for tf in EXT_KEEP]
-    keys3 = [(s, tf) for s in broad for tf in BROAD_KEEP]
+    keys3 = [(s, tf) for s in broad for tf in BROAD_KEEP if tf in BROAD_PART[part]]
     keys = keys2 + keysc + keys3
     now = time.time()
     try:
@@ -599,8 +632,11 @@ def main():
     due2, rest2 = plan_refresh(prev, keys2, now, b.budget, trading, closed)
     due3, rest3 = plan_refresh(prev, keys3, now, broad_budget, trading, closed, BROAD_TARGET)
     duec, restc = plan_refresh(prev, keysc, now, int(scale * CRYPTO_BUDGET), True, closed)  # crypto never closes
-    due, rest = due2 + duec + due3, rest2 + restc + rest3
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    # series already published first, so their refreshes are not put off behind a large batch of
+    # new ones (a widened list, a new timeframe); those take whatever time is left, and the rest of
+    # them come in on the next builds
+    due, rest = published_first(due2 + duec + due3, prev), rest2 + restc + rest3
+    with ThreadPoolExecutor(max_workers=6) as pool:
         ref = list(pool.map(b.refresh, due))
     undone = [(s, tf) for s, tf, r in ref if r != "fresh"]  # put off or refused: keep what was published
     refused = {(s, tf): r for s, tf, r in ref if r not in (None, "fresh")}
@@ -668,11 +704,13 @@ def main():
     print(f"core: {len(jobs) - len(core_bad)} of {len(jobs)} series fresh in {t_core:.0f} s")
     print(f"extended: {len(due)} due ({sum(1 for r in ref if r[2] == 'fresh')} refreshed, {sum(1 for r in ref if r[2] is None)} put off), "
           f"{sum(1 for r in car if r[2] == 'carried')} carried, {len(lost)} missing; {n_ext} of {len(extended)} extended, {n_coin} of {len(crypto)} coin and {n_broad} of {len(broad)} broad symbols; "
-          f"{b.joined} daily refreshes joined onto carried history; market {'open' if trading else 'shut'}")
+          f"{b.joined} refreshes joined onto carried history; market {'open' if trading else 'shut'}")
     ext_bad = [(s, tf, r) for (s, tf), r in refused.items() if b.state.get(f"{s}|{tf}", 0) > 0]  # refused but carried
     print(f"{len(catalog['symbols'])} symbols, {size / 1e6:.1f} MB, {b.throttled} throttled answers, {time.time() - b.t0:.0f} s")
     for line in ([f"core {s} {tf}: {r}" for s, tf, r in core_bad] + [f"extended {s} {tf}: {r}" for s, tf, r in lost] + [f"extended {s} {tf}: kept the published copy ({r})" for s, tf, r in ext_bad] + b.notes)[:60]:
         print("  ", line)
+    if size > SITE_LIMIT:
+        sys.exit(f"{size / 1e6:.0f} MB is more than a site may publish ({SITE_LIMIT / 1e6:.0f} MB); not publishing. Keep less, or move a tier to a data site of its own (--part).")
     # a build with most of its core data missing must not replace a good one
     failed = [r for r in core_bad if r[2].startswith("failed")]
     if jobs and (len(failed) > len(jobs) * 0.25 or len(core_bad) > len(jobs) * 0.5):

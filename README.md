@@ -146,10 +146,14 @@ The data set has two tiers, so it can be wide without flooding the provider with
 
 | Tier | Symbols | History | Refreshed |
 | --- | --- | --- | --- |
-| Core | 182: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
-| Extended | 711: the rest of the S&P 500 and other followed stocks, with sectors, about 100 more ETFs, and every WisdomTree, Cambria and Alpha Architect fund (each issuer has its own list in the Scanner and Markets) (`web/universe.json`) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
-| Crypto | 102: the largest coins by market cap (CoinGecko) that trade at least $1M a day, each matched to the Yahoo ticker with the same price (several coins share a symbol) | hourly, daily | like extended, but around the clock: crypto never closes |
-| Broad | 5,126: every other US-listed common stock over $2B market cap; smaller ones (from $200M) that trade at least $5M a day; every other US ETF that trades at least $2M a day; and the members of 13 world indexes (FTSE 100, DAX 40, CAC 40, AEX, IBEX 35, FTSE MIB, SMI, OMX Stockholm 30, Nikkei 225, Hang Seng, S&P/TSX 60, S&P/ASX 200, NIFTY 50) from their Wikipedia articles, each with a list of its own (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | 5 years daily, on a site of its own (below) | within about an hour while the market is open. A refresh asks for the last month only and joins it onto the carried history; if the two disagree on any shared day (a split or dividend restated the history) or the history is a week old, the whole series is fetched again |
+| Core | 184: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
+| Extended | 1,073: the rest of the S&P 500 and other followed stocks, with sectors; every ETF that trades at least $50M a day (VGT, VYM, ...); about 100 more chosen funds; and every WisdomTree, Cambria and Alpha Architect fund (`web/universe.json`) | 5-minute (about four weeks; 15m and 30m are built from it), hourly (about 10 months), 10 years daily | on a rolling basis: 5-minute bars within about 30 minutes, daily and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
+| Crypto | 102: the largest coins by market cap (CoinGecko) that trade at least $1M a day, each matched to the Yahoo ticker with the same price (several coins share a symbol) | 5-minute, hourly, daily | like extended, but around the clock: crypto never closes |
+| Broad | 7,477: every other US-listed common stock over $2B market cap; smaller ones (from $200M) that trade at least $1M a day; every other US ETF that trades at least $250K a day, and every fund of 34 issuers (Vanguard, iShares, SPDR, Schwab, Invesco, First Trust, ProShares, Direxion, Global X, ARK, JPMorgan, Dimensional, Fidelity, Avantis, VanEck, ...) that trades at all; and the members of 13 world indexes (FTSE 100, DAX 40, CAC 40, AEX, IBEX 35, FTSE MIB, SMI, OMX Stockholm 30, Nikkei 225, Hang Seng, S&P/TSX 60, S&P/ASX 200, NIFTY 50) from their Wikipedia articles. Each issuer and each index has a list of its own in the Scanner and Markets (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | hourly (about 8 months), 10 years daily (on a site of its own, below) | daily within about 90 minutes, hourly within about two hours while the market is open |
+
+Every refresh asks for the last few bars only and joins them onto the carried history; if the two
+disagree on any shared bar (a split or dividend restated the history), the history is a week old,
+or it does not reach as far back as is now kept, the whole series is fetched again.
 
 A build fetches only the extended series that are due and carries the others over from the last
 published build, which the job downloads as it was uploaded (reading it back through the public
@@ -157,13 +161,16 @@ site would spend the site's bandwidth allowance on its own upkeep; that route is
 Nothing else is stored. A symbol the provider stops answering for keeps its last published history,
 and a build that would lose a real share of what is published stops instead of replacing it.
 
-**Two sites.** GitHub Pages allows 1 GB a site, so the broad tier is published separately, at
-https://21e8-miner.github.io/meridian-data/ (repository `21e8-miner/meridian-data`, built by the
-same `tools/snapshot.py --part=broad`; its workflow is kept here as `data-site/pages.yml`). The
-main site's catalog names it as a shard and the page merges the two; if the data site cannot be
-read, its symbols are left out and everything else works. More shards can be added the same way.
-Files are published in a compact form (bar times as gaps, the dividend adjustment as runs of a
-factor) that the page decodes, about 30% smaller than plain columns.
+**Two sites.** GitHub Pages allows 1 GB a site, so the broad tier's daily history is published
+separately, at https://21e8-miner.github.io/meridian-data/ (repository `21e8-miner/meridian-data`,
+built by the same `tools/snapshot.py --part=broad`; its workflow is kept here as
+`data-site/pages.yml`); its hourly history is on the main site. The main site's catalog names the
+data site as a shard and the page merges the two, taking each timeframe of a symbol from whichever
+site has it; if the data site cannot be read, what is on it is left out and everything else works.
+More shards can be added the same way, and a build that would publish more than a site may hold
+stops instead. Files are published in a compact form (bar times as gaps in the largest step that
+divides them, the dividend adjustment as runs of a factor) that the page decodes, about 30% smaller
+than plain columns.
 
 Foreign stocks are priced in their own currency; the Markets view converts their dollar volume
 with the core currency pairs. World markets are refreshed on the US schedule, so a market that
@@ -171,8 +178,8 @@ has closed has its final bar within the day. Script and stylesheet addresses car
 version, so a browser never runs a mix of two builds' code.
 
 What differs from running locally: only the listed symbols have history (plus any `XYZ:` live
-market); extended symbols have no timeframe shorter than an hour and broad ones nothing shorter
-than a day, and neither has a live estimate; a scan over a big list downloads about 0.13 MB per
+market); extended symbols have no timeframe shorter than five minutes and broad ones nothing
+shorter than an hour, and neither has a live estimate; a scan over a big list downloads about 0.13 MB per
 symbol the first time; 1-minute
 history is about a day deep; and exchange prints are as old as that series' last refresh (the
 status line says how old) with estimates bridging to now where a proxy exists. The Markets view
