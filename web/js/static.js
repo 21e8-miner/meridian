@@ -325,12 +325,17 @@ export function tfs(symbol) {
 }
 
 // A year of daily closes for every symbol in one file, for the Markets view.
-let packAt = null;
-export async function pack() {
+// `broad`: also the broad tier's file (pages published before it was split have it all in one)
+const packAt = {};
+export async function pack(broad = false) {
   const ix = await loadIndex();
   const g = ix.generated;
-  if (!packAt || packAt.g !== g) packAt = { g, data: await getJson(`data/pack.json?g=${g}`) };
-  return packAt.data;
+  const get = async (name) => { const hit = packAt[name]; if (hit && hit.g === g) return hit.data; const data = await getJson(`data/${name}?g=${g}`); packAt[name] = { g, data }; return data; };
+  const main = await get('pack.json');
+  if (!broad) return main;
+  let more = { s: {} };
+  try { more = await get('pack-broad.json'); } catch { /* an older build: everything is in pack.json */ }
+  return { generated: main.generated, s: { ...main.s, ...more.s } };
 }
 
 export async function batch(symbols, tf, limit = 0, live = false) {

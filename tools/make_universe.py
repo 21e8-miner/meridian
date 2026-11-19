@@ -3,7 +3,7 @@
 Rebuild web/universe.json: the stock list, with sectors, that the shared page publishes and the
 Markets view groups by.
 
-    python3 tools/make_universe.py constituents.csv [screener.json] [--etfs=etf_screener.json]
+    python3 tools/make_universe.py constituents.csv [screener.json] [--etfs=etf_screener.json] [--liquidity=liquidity.json]
 
 The CSV is the public S&P 500 constituents table (columns Symbol, Security, GICS Sector, ...), as
 kept at github.com/datasets/s-and-p-500-companies. A short hand-kept list of widely followed names
@@ -19,7 +19,12 @@ ETFS is a hand-kept list of funds with daily and hourly history. Every fund of t
 FAMILIES is added too, read from Nasdaq's public ETF list
 (https://api.nasdaq.com/api/screener/etf?tableonly=true&limit=10000&download=true) by the issuer's
 name in the fund name, and each family gets its own list in the app. Without --etfs the previous
-families are kept. Run this again when the index changes; nothing else reads the input files.
+families are kept.
+
+--liquidity is the output of tools/liquidity_probe.py: each candidate's average dollar volume over
+its last 20 sessions. With it, "broad" also takes smaller stocks (market cap from SMALL_MIN_CAP)
+and any other ETF, as long as they trade at least STOCK_MIN_DV / ETF_MIN_DV a day. Run this again
+when the index changes; nothing else reads the input files.
 """
 from __future__ import annotations
 
@@ -56,16 +61,20 @@ ETFS = ("XME XOP XHB XRT ITB IBB IYR VNQ KWEB FXI EWJ EWZ EWG EWU EWT EWW EWC EW
         "MTUM QUAL USMV VLUE SPLV RSP IWF IWD VUG VTV IJH IJR VB VO VOO VTI IVV SCHD VIG DGRO JEPI JEPQ QQQM OEF").split()
 # issuers whose whole US fund line-up is published, matched in the fund's name
 FAMILIES = ("WisdomTree", "Cambria", "Alpha Architect")
-BROAD_MIN_CAP = 2e9
+BROAD_MIN_CAP = 2e9    # US stocks this big are always included
+SMALL_MIN_CAP = 2e8    # smaller ones, from this size, only if they trade enough (needs --liquidity)
+STOCK_MIN_DV = 5e6     # dollars traded a day, 20-session average
+ETF_MIN_DV = 2e6
 NASDAQ_SECTOR = {"Technology": "Information Technology", "Telecommunications": "Communication Services", "Finance": "Financials",
                  "Basic Materials": "Materials", "Consumer Discretionary": "Consumer Discretionary", "Consumer Staples": "Consumer Staples",
                  "Health Care": "Health Care", "Industrials": "Industrials", "Energy": "Energy", "Utilities": "Utilities", "Real Estate": "Real Estate"}
 NOT_COMMON = re.compile(r"\b(preferred|warrants?|rights|units|notes|debentures|subordinated|perpetual|depositary shares,? each representing)\b", re.I)
 
 
-def broad_from(path: str, taken: set) -> dict:
+def broad_from(path: str, taken: set, liq: dict | None = None) -> dict:
     with open(path) as f:
         rows = json.load(f)["data"]["rows"]
+    liq = liq or {}
     out = {}
     for r in rows:
         sym = (r.get("symbol") or "").strip().upper().replace("/", "-")
@@ -73,7 +82,9 @@ def broad_from(path: str, taken: set) -> dict:
             cap = float(r.get("marketCap") or 0)
         except ValueError:
             cap = 0
-        if cap < BROAD_MIN_CAP or sym in taken or not re.fullmatch(r"[A-Z]{1,5}(-[A-Z])?", sym):
+        traded = (liq.get(sym) or {}).get("dv", 0)
+        big_enough = cap >= BROAD_MIN_CAP or (cap >= SMALL_MIN_CAP and traded >= STOCK_MIN_DV)
+        if not big_enough or sym in taken or not re.fullmatch(r"[A-Z]{1,5}(-[A-Z])?", sym):
             continue
         name = r.get("name") or ""
         if NOT_COMMON.search(name) or "%" in name:
@@ -81,6 +92,20 @@ def broad_from(path: str, taken: set) -> dict:
         sec = NASDAQ_SECTOR.get((r.get("sector") or "").strip())
         out[sym] = SECTORS.index(sec) if sec else -1
     return dict(sorted(out.items()))
+
+
+def etfs_from(path: str, taken: set, liq: dict) -> list:
+    """Every other listed ETF that trades at least ETF_MIN_DV a day."""
+    with open(path) as f:
+        data = json.load(f)["data"]
+    rows = (data.get("data") or data)["rows"]
+    out = set()
+    for r in rows:
+        sym = (r.get("symbol") or "").strip().upper()
+        m = liq.get(sym) or {}
+        if sym not in taken and re.fullmatch(r"[A-Z]{1,5}", sym) and not m.get("gone") and m.get("type") == "ETF" and m.get("dv", 0) >= ETF_MIN_DV:
+            out.add(sym)
+    return sorted(out)
 
 
 def families_from(path: str) -> dict:
@@ -118,7 +143,15 @@ def main():
     families = families_from(opts["etfs"]) if "etfs" in opts else (old.get("families") or {})
     funds = sorted(set(ETFS) | {s for v in families.values() for s in v})
     taken = set(stocks) | set(funds)
-    broad = broad_from(sys.argv[2], taken) if len(sys.argv) > 2 else {k: v for k, v in (old.get("broad") or {}).items() if k not in taken}
+    liq = None
+    if "liquidity" in opts:
+        with open(opts["liquidity"]) as f:
+            liq = json.load(f)
+    broad = broad_from(sys.argv[2], taken, liq) if len(sys.argv) > 2 else {k: v for k, v in (old.get("broad") or {}).items() if k not in taken}
+    if liq is not None and "etfs" in opts:
+        for sym in etfs_from(opts["etfs"], taken | set(broad), liq):
+            broad[sym] = -1  # funds have no sector
+        broad = dict(sorted(broad.items()))
     out = {
         "asof": time.strftime("%Y-%m-%d"),
         "sectors": SECTORS,
@@ -127,7 +160,8 @@ def main():
         "stocks": dict(sorted(stocks.items())),
         "etfs": funds,
         "families": families,  # issuer -> its funds (all also in "etfs")
-        "broad": broad,  # symbol -> sector index, -1 when the source had none
+        "broad": broad,  # symbol -> sector index, -1 when the source had none (and for funds)
+        "rules": {"broad_min_cap": BROAD_MIN_CAP, "small_min_cap": SMALL_MIN_CAP, "stock_min_dv": STOCK_MIN_DV, "etf_min_dv": ETF_MIN_DV, "liquidity": liq is not None},
     }
     with open(path, "w") as f:
         json.dump(out, f, separators=(",", ":"))

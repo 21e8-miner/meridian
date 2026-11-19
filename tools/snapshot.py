@@ -19,7 +19,8 @@ Two tiers, so the data set can be wide without hammering the provider:
             published site itself (--site). So each series is refreshed about twice an hour while
             the market is open, once after the close, and not at all overnight, at the weekend or
             on a holiday, when it cannot change.
-  broad     daily history only, for the other US stocks over $2B (web/universe.json "broad").
+  broad     daily history only, for the other US stocks over $2B, smaller ones and other ETFs that
+            trade enough (web/universe.json "broad"; see tools/make_universe.py).
             Refreshed the same way, about once an hour while the market is open. A refresh asks for
             the last month only and joins it onto the carried history, unless that history no longer
             matches (a split or a dividend restates it), in which case the whole series is fetched.
@@ -82,7 +83,7 @@ EXT_TARGET = {"1d": 30 * 60, "1h": 60 * 60}
 EXT_BUDGET = 320       # extended refreshes per build, beyond series the site does not have at all
 BROAD_KEEP = {"1d": 2520}
 BROAD_TARGET = {"1d": 60 * 60}
-BROAD_BUDGET = 400     # broad refreshes per build (each is a small request: a month of bars)
+BROAD_BUDGET = 700     # broad refreshes per build (each is a small request: a month of bars)
 FULL_EVERY = 7 * 86400  # a joined-up series is fetched whole again after this long, whatever it looks like
 SETTLE = 30 * 60       # a day's last bars are final this long after the close
 DEADLINE = 330         # seconds into the build after which no new extended refresh starts
@@ -490,15 +491,15 @@ def main():
     data = os.path.join(out, "data")
     with open(os.path.join(data, "catalog.json"), "w") as f:
         f.write(blob)
-    # index.json keeps the whole catalog too: pages opened before this layout existed read it there
-    with open(os.path.join(data, "index.json"), "w") as f:
-        json.dump({"generated": generated, **catalog}, f, separators=(",", ":"))
     with open(os.path.join(data, "stamp.json"), "w") as f:
         json.dump({"generated": generated, "catalog": hashlib.sha1(blob.encode()).hexdigest()[:12], "symbols": len(catalog["symbols"])}, f, separators=(",", ":"))
     with open(os.path.join(data, "state.json"), "w") as f:
         json.dump(b.state, f, separators=(",", ":"))
-    with open(os.path.join(data, "pack.json"), "w") as f:
-        json.dump({"generated": generated, "s": {e["symbol"]: b.pack[e["symbol"]] for e in symbols if e["symbol"] in b.pack}}, f, separators=(",", ":"))
+    # the market summary in two files, so a view of the core and extended lists (the S&P 500, the
+    # funds) does not have to download a year of closes for every broad symbol too
+    for name, keep in (("pack.json", lambda e: e.get("tier") != 3), ("pack-broad.json", lambda e: e.get("tier") == 3)):
+        with open(os.path.join(data, name), "w") as f:
+            json.dump({"generated": generated, "s": {e["symbol"]: b.pack[e["symbol"]] for e in symbols if e["symbol"] in b.pack and keep(e)}}, f, separators=(",", ":"))
     open(os.path.join(out, ".nojekyll"), "w").close()
 
     size = sum(os.path.getsize(os.path.join(dp, fn)) for dp, _, fns in os.walk(data) for fn in fns)

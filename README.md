@@ -6,7 +6,8 @@ a small model lab and seasonality tables. One Python file serves it; the front e
 step and no dependencies.
 
 **Shared page:** https://21e8-miner.github.io/meridian/ — runs in the browser with no install, on
-about 2,300 symbols (every US stock over $2B, the S&P 500 with sectors, 270 ETFs, futures,
+about 5,000 symbols (every US stock over $2B and the liquid smaller ones, the S&P 500 with sectors,
+about 2,100 ETFs, futures,
 world indexes, currencies, crypto) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
 
 ## Run
@@ -147,7 +148,7 @@ The data set has two tiers, so it can be wide without flooding the provider with
 | --- | --- | --- | --- |
 | Core | 182: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
 | Extended | 711: the rest of the S&P 500 and other followed stocks, with sectors, about 100 more ETFs, and every WisdomTree, Cambria and Alpha Architect fund (each issuer has its own list in the Scanner and Markets) (`web/universe.json`) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
-| Broad | 1402: every other US-listed common stock over $2B market cap (from Nasdaq's public screener; sectors are Nasdaq's, mapped onto the GICS names, so rougher) | 10 years daily | within about an hour while the market is open. A refresh asks for the last month only and joins it onto the carried history; if the two disagree on any shared day (a split or dividend restated the history) or the history is a week old, the whole series is fetched again |
+| Broad | 4,183: every other US-listed common stock over $2B market cap; smaller ones (from $200M) that trade at least $5M a day; and every other US ETF that trades at least $2M a day (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | 10 years daily | within about an hour while the market is open. A refresh asks for the last month only and joins it onto the carried history; if the two disagree on any shared day (a split or dividend restated the history) or the history is a week old, the whole series is fetched again |
 
 A build fetches only the extended series that are due and carries the others over from the last
 published build, which the job downloads as it was uploaded (reading it back through the public
@@ -161,10 +162,13 @@ than a day, and neither has a live estimate; a scan over a big list downloads ab
 symbol the first time; 1-minute
 history is about a day deep; and exchange prints are as old as that series' last refresh (the
 status line says how old) with estimates bridging to now where a proxy exists. The Markets view
-reads one small file with a year of daily closes for every symbol.
+reads a year of daily closes per symbol from one file for the core and extended lists, and a
+second, larger one only when a list includes broad symbols.
 
-To change the lists, edit `tools/make_universe.py` or feed it a newer constituents table and
-screener file (its docstring says where each comes from), and run it; `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
+To change the lists, edit `tools/make_universe.py` or feed it newer input files (its docstring
+says where each comes from) and run it. The liquidity cutoffs need `tools/liquidity_probe.py`
+first, which measures each candidate's dollar volume with one small request (about 11 minutes for
+7,000 symbols); `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
 
 ## Monitoring with Prometheus
 

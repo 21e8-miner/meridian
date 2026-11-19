@@ -117,7 +117,7 @@ async function load() {
   const { sectors, stocks } = await stockSectors();
   const out = [];
   if (ix) {
-    const pk = await be.pack();
+    const pk = await be.pack(syms.some((s) => { const e = ix.by.get(s); return e && e.tier === 3; }));
     if (my !== loadSeq) return;
     if (pk.generated === built && loadedFor === cfg.list) return; // nothing new since the last look
     stamp = pk.generated;
