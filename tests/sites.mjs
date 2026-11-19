@@ -22,5 +22,5 @@ check('a sector missing on one site is taken from the other', vgt.sector === 2);
 check('fund families and indexes are the union of every site\'s', ix.families.Vanguard.join() === 'VOO,VGT,VHT' && ix.families.Cambria.join() === 'TAIL' && ix.indexes['Nikkei 225'].members.join() === '7203.T');
 check('the catalogs read are not changed by merging', main.symbols[1].tfs.join() === '1h' && main.families.Vanguard.length === 2 && !('bases' in main.symbols[1]));
 check('this page\'s own settings are kept', ix.shards.length === 1);
-check('what a symbol has, in words', kept(['1h', '1d']) === 'daily and hourly history' && kept(['1d']) === 'daily history' && kept(['5m', '1h', '1d']) === 'daily, hourly and five-minute history');
+check('what a symbol has, in words', kept(['1h', '1d']) === 'daily and hourly history' && kept(['1d']) === 'daily history' && kept(['5m', '1h', '1d']) === 'daily, hourly and five-minute history' && kept(['1m', '5m', '1h', '1d']) === 'daily, hourly, five-minute and one-minute history');
 done('sites');

@@ -11,8 +11,8 @@ Two tiers, so the data set can be wide without hammering the provider:
 
   core      every timeframe (1m, 5m, 1h, daily), fetched fresh on every build. Everything with a
             live proxy, plus the main futures, ETFs, indexes, currencies, crypto and mega caps.
-  extended  daily, hourly and five-minute history for the S&P 500, other followed stocks, the
-            most traded funds and coins (web/universe.json). A build
+  extended  daily, hourly, five-minute and one-minute history for the S&P 500, other followed
+            stocks, the most traded funds and coins (web/universe.json). A build
             refreshes only the series that are due, oldest first, up to a fixed number of requests,
             and carries the others over from the previous build: a local copy of it (--prev, what
             the scheduled job uses: it downloads the last published build) or, failing that, the
@@ -97,11 +97,11 @@ SP500 = set(UNIVERSE.get("sp500") or [])
 # timeframe -> how many of the most recent bars to keep (15m and 30m are built from 5m in the page)
 KEEP = {"1m": 1500, "5m": 3200, "1h": 3000, "1d": 2520}
 CORE_RANGE = {"1d": "10y"}  # ask for what is kept, not the provider's default window
-EXT_KEEP = {"1d": 2520, "1h": 1500, "5m": 1560}  # ten years, ten months, four weeks
-EXT_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo"}
+EXT_KEEP = {"1d": 2520, "1h": 1500, "5m": 1560, "1m": 1500}  # ten years, ten months, four weeks, four sessions
+EXT_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo", "1m": "5d"}
 # how old an extended series may get while the stock market is open, in seconds
-EXT_TARGET = {"1d": 60 * 60, "1h": 60 * 60, "5m": 30 * 60}
-EXT_BUDGET = 800       # extended refreshes per build, beyond series the site does not have at all
+EXT_TARGET = {"1d": 60 * 60, "1h": 60 * 60, "5m": 30 * 60, "1m": 30 * 60}
+EXT_BUDGET = 1200       # extended refreshes per build, beyond series the site does not have at all
 BROAD_KEEP = {"1d": 2520, "1h": 1200, "5m": 780}  # ten years of days, eight months of hours, two weeks of 5m
 BROAD_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo"}
 BROAD_TARGET = {"1d": 90 * 60, "1h": 120 * 60, "5m": 60 * 60}  # the least traded and the biggest tier: refreshed less often
@@ -109,7 +109,7 @@ BROAD_BUDGET = 1000    # broad refreshes per build and timeframe (each is a smal
 # Which of the broad tier's timeframes each part of a split data set publishes (see --part)
 BROAD_PART = {"all": ("1d", "1h", "5m"), "main": ("1h",), "broad": ("1d", "5m")}
 # how much a refresh asks for, to join onto the carried history
-JOIN_RANGE = {"1d": "1mo", "1h": "5d", "5m": "5d"}
+JOIN_RANGE = {"1d": "1mo", "1h": "5d", "5m": "5d", "1m": "1d"}
 CRYPTO_BUDGET = 200    # coin refreshes per build
 # currency -> its value in US dollars, from these core pairs (True: the pair is quoted as USD per unit)
 FX_PAIRS = {"EUR": ("EURUSD=X", True), "GBP": ("GBPUSD=X", True), "AUD": ("AUDUSD=X", True), "NZD": ("NZDUSD=X", True),

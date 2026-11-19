@@ -8,8 +8,8 @@ Markets view groups by.
 
 The CSV is the public S&P 500 constituents table (columns Symbol, Security, GICS Sector, ...), as
 kept at github.com/datasets/s-and-p-500-companies. A short hand-kept list of widely followed names
-outside the index is added. Those are the "stocks": daily, hourly and five-minute history on the
-shared page.
+outside the index is added. Those are the "stocks": daily, hourly, five-minute and one-minute
+history on the shared page.
 
 screener.json is Nasdaq's public list of US-listed stocks
 (https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&download=true). Common

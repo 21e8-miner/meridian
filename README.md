@@ -147,8 +147,8 @@ The data set has two tiers, so it can be wide without flooding the provider with
 | Tier | Symbols | History | Refreshed |
 | --- | --- | --- | --- |
 | Core | 184: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
-| Extended | 1,073: the rest of the S&P 500 and other followed stocks, with sectors; every ETF that trades at least $50M a day (VGT, VYM, ...); about 100 more chosen funds; and every WisdomTree, Cambria and Alpha Architect fund (`web/universe.json`) | 5-minute (about four weeks; 15m and 30m are built from it), hourly (about 10 months), 10 years daily | on a rolling basis: 5-minute bars within about 30 minutes, daily and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
-| Crypto | 102: the largest coins by market cap (CoinGecko) that trade at least $1M a day, each matched to the Yahoo ticker with the same price (several coins share a symbol) | 5-minute, hourly, daily | like extended, but around the clock: crypto never closes |
+| Extended | 1,073: the rest of the S&P 500 and other followed stocks, with sectors; every ETF that trades at least $50M a day (VGT, VYM, ...); about 100 more chosen funds; and every WisdomTree, Cambria and Alpha Architect fund (`web/universe.json`) | 1-minute (about four sessions), 5-minute (about four weeks; 15m and 30m are built from it), hourly (about 10 months), 10 years daily | on a rolling basis: 1- and 5-minute bars within about 30 minutes, daily and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
+| Crypto | 102: the largest coins by market cap (CoinGecko) that trade at least $1M a day, each matched to the Yahoo ticker with the same price (several coins share a symbol) | 1-minute (about a day), 5-minute, hourly, daily | like extended, but around the clock: crypto never closes |
 | Broad | 7,477: every other US-listed common stock over $2B market cap; smaller ones (from $200M) that trade at least $1M a day; every other US ETF that trades at least $250K a day, and every fund of 34 issuers (Vanguard, iShares, SPDR, Schwab, Invesco, First Trust, ProShares, Direxion, Global X, ARK, JPMorgan, Dimensional, Fidelity, Avantis, VanEck, ...) that trades at all; and the members of 13 world indexes (FTSE 100, DAX 40, CAC 40, AEX, IBEX 35, FTSE MIB, SMI, OMX Stockholm 30, Nikkei 225, Hang Seng, S&P/TSX 60, S&P/ASX 200, NIFTY 50) from their Wikipedia articles. Each issuer and each index has a list of its own in the Scanner and Markets (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | 5-minute (about two weeks; 15m and 30m are built from it), hourly (about 8 months), 10 years daily; the daily and 5-minute history on a site of its own (below) | 5-minute within about an hour, daily within about 90 minutes, hourly within about two hours while the market is open |
 
 Every refresh asks for the last few bars only and joins them onto the carried history; if the two
@@ -178,8 +178,8 @@ has closed has its final bar within the day. Script and stylesheet addresses car
 version, so a browser never runs a mix of two builds' code.
 
 What differs from running locally: only the listed symbols have history (plus any `XYZ:` live
-market); symbols outside the core have no timeframe shorter than five minutes (broad ones keep
-two weeks of it) and no live estimate; a scan over a big list downloads about 0.13 MB per
+market); broad symbols have no timeframe shorter than five minutes (two weeks of it), extended
+ones keep about four sessions of one-minute bars, and neither has a live estimate; a scan over a big list downloads about 0.13 MB per
 symbol the first time; 1-minute
 history is about a day deep; and exchange prints are as old as that series' last refresh (the
 status line says how old) with estimates bridging to now where a proxy exists. The Markets view

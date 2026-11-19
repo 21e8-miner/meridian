@@ -342,6 +342,7 @@ check("format: times that do not rise are published as they are", snap.encode_se
 check("format: a plain file passes through decoding unchanged", snap.decode_series(ser) is ser and snap.decode_series(None) is None)
 check("broad tier keeps ten years of daily bars, eight months of hourly and two weeks of five-minute", snap.BROAD_KEEP == {"1d": 2520, "1h": 1200, "5m": 780} and snap.BROAD_RANGE == {"1d": "10y", "1h": "1y", "5m": "1mo"} and "5m" in snap.BROAD_TARGET)
 check("extended tier and coins have five-minute bars too (15m and 30m are built from them)", snap.EXT_KEEP["5m"] > 1000 and snap.EXT_RANGE["5m"] == "1mo" and "5m" in snap.EXT_TARGET and "5m" in snap.JOIN_RANGE)
+check("extended tier and coins have one-minute bars: four sessions, fetched within the provider's window, joined from today's", snap.EXT_KEEP["1m"] == snap.KEEP["1m"] and snap.EXT_RANGE["1m"] == "5d" and snap.JOIN_RANGE["1m"] == "1d" and snap.EXT_TARGET["1m"] == 1800 and "1m" not in snap.BROAD_KEEP)
 check("a split data set publishes the broad tier's daily and 5-minute history on the data site and its hourly on the main one",
       snap.BROAD_PART["broad"] == ("1d", "5m") and snap.BROAD_PART["main"] == ("1h",) and set(snap.BROAD_PART["all"]) == set(snap.BROAD_KEEP))
 check("history range: files from before it was recorded count as five years (broad daily) or the current window",

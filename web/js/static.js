@@ -295,9 +295,9 @@ async function loadIndex(force = false) {
   return index;
 }
 // what a symbol has on the shared page, in words: 'daily and hourly history', 'daily history'
-const WORD = { '1d': 'daily', '1h': 'hourly', '5m': 'five-minute' };
+const WORD = { '1d': 'daily', '1h': 'hourly', '5m': 'five-minute', '1m': 'one-minute' };
 export const kept = (tfs) => {
-  const w = ['1d', '1h', '5m'].filter((t) => tfs.includes(t)).map((t) => WORD[t]);
+  const w = ['1d', '1h', '5m', '1m'].filter((t) => tfs.includes(t)).map((t) => WORD[t]);
   return `${w.length > 1 ? w.slice(0, -1).join(', ') + ' and ' + w[w.length - 1] : w[0] || 'no'} history`;
 };
 // The published file format (tools/snapshot.py: encode_series): bar times as gaps in bar steps,
