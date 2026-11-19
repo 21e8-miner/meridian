@@ -50,7 +50,9 @@ jobs:
           mkdir -p prev && tar -xf prev_artifact/artifact.tar -C prev && rm -rf prev_artifact
       - name: Build site and snapshot
         # --site is the fallback when there is no local copy of the last build (it expires after a day)
-        run: python tools/snapshot.py _site --prev=prev --site="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
+        # the broad tier is published by the meridian-data repository (data-site/pages.yml); this
+        # site carries the rest and tells the page where that one is
+        run: python tools/snapshot.py _site --part=main --shard="https://${GITHUB_REPOSITORY_OWNER}.github.io/meridian-data/" --prev=prev --site="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
