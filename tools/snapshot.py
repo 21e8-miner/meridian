@@ -19,7 +19,8 @@ Two tiers, so the data set can be wide without hammering the provider:
             published site itself (--site). So each series is refreshed about twice an hour while
             the market is open, once after the close, and not at all overnight, at the weekend or
             on a holiday, when it cannot change.
-  broad     daily (ten years) and hourly history, for the other US stocks over $2B, smaller ones,
+  broad     daily (ten years), hourly and five-minute (two weeks) history, for the other US stocks
+            over $2B, smaller ones,
             other ETFs that trade enough and the members of world indexes (web/universe.json
             "broad" and "intl"; see tools/make_universe.py). Refreshed the same way, less often.
 
@@ -33,9 +34,11 @@ far back as is now kept; then the whole series is fetched.
 
 The data set can be split across sites, each with its own size limit (GitHub Pages: 1 GB):
 
-    --part=main  --shard=URL   everything but the broad tier's daily history; the page also reads
-                               the site(s) at URL, and takes each timeframe from whichever has it
-    --part=broad               the broad tier's daily history only, as a data site of its own (no app)
+    --part=main  --shard=URL   everything but the broad tier's daily and 5-minute history; the page
+                               also reads the site(s) at URL, and takes each timeframe from
+                               whichever has it
+    --part=broad               the broad tier's daily and 5-minute history only, as a data site of
+                               its own (no app)
 
 The default, --part=all, builds one site with everything.
 """
@@ -99,12 +102,12 @@ EXT_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo"}
 # how old an extended series may get while the stock market is open, in seconds
 EXT_TARGET = {"1d": 60 * 60, "1h": 60 * 60, "5m": 30 * 60}
 EXT_BUDGET = 800       # extended refreshes per build, beyond series the site does not have at all
-BROAD_KEEP = {"1d": 2520, "1h": 1200}  # ten years of days, eight months of hours
-BROAD_RANGE = {"1d": "10y", "1h": "1y"}
-BROAD_TARGET = {"1d": 90 * 60, "1h": 120 * 60}  # the least traded and the biggest tier: refreshed less often
-BROAD_BUDGET = 1000    # broad refreshes per build (each is a small request: the last few bars)
+BROAD_KEEP = {"1d": 2520, "1h": 1200, "5m": 780}  # ten years of days, eight months of hours, two weeks of 5m
+BROAD_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo"}
+BROAD_TARGET = {"1d": 90 * 60, "1h": 120 * 60, "5m": 60 * 60}  # the least traded and the biggest tier: refreshed less often
+BROAD_BUDGET = 1000    # broad refreshes per build and timeframe (each is a small request: the last few bars)
 # Which of the broad tier's timeframes each part of a split data set publishes (see --part)
-BROAD_PART = {"all": ("1d", "1h"), "main": ("1h",), "broad": ("1d",)}
+BROAD_PART = {"all": ("1d", "1h", "5m"), "main": ("1h",), "broad": ("1d", "5m")}
 # how much a refresh asks for, to join onto the carried history
 JOIN_RANGE = {"1d": "1mo", "1h": "5d", "5m": "5d"}
 CRYPTO_BUDGET = 200    # coin refreshes per build
@@ -178,7 +181,7 @@ def plan_refresh(state: dict, keys: list, now: float, budget: int, trading: bool
     return due, [k for k in keys if k not in chosen and k not in dead]
 
 
-def join_series(old: dict, new: dict) -> dict | None:
+def join_series(old: dict, new: dict, need: int = 3) -> dict | None:
     """Carried history + a recent window of fresh bars -> one series, or None when they do not
     agree on the bars both have (a split or a dividend has restated the history since: fetch it
     whole). Compared: the close and the dividend adjustment (adjusted / close) on every shared bar
@@ -197,7 +200,7 @@ def join_series(old: dict, new: dict) -> dict | None:
         if abs(a - b) > 1e-6 * max(1.0, abs(b)) or abs(adj(old, i) - adj(new, j)) > 1e-6:
             return None
         shared += 1
-    if shared < 3:
+    if shared < need:
         return None
     k = 0
     while k < len(old["t"]) and old["t"][k] < new["t"][0]:
@@ -213,6 +216,22 @@ def join_series(old: dict, new: dict) -> dict | None:
         out["rng"] = old["rng"]  # and how far back that fetch went
     return out
 
+
+
+TRUNCATED_GAP = 10 * 86400  # a short answer is spliced on only if it starts this close to the published end
+
+
+def splice_truncated(old: dict | None, new: dict) -> dict | None:
+    """The provider sometimes answers a request for years of history with a few bars only (seen for
+    ROKU, SNDK and USDCNH=X: the history comes back days later). Publishing that answer would throw
+    away what is published. So when a whole-series fetch has under half the bars of the published
+    series and starts later, the published history is kept and the fresh bars are joined on, as
+    long as they agree on any bars both have and do not leave a gap. None: use the fetch as it is."""
+    if not old or not old.get("t") or not new.get("t"):
+        return None
+    if len(new["t"]) >= 0.5 * len(old["t"]) or new["t"][0] <= old["t"][0] or new["t"][0] - old["t"][-1] > TRUNCATED_GAP:
+        return None
+    return join_series(old, new, need=0)
 
 
 def history_range(d: dict, tier: int) -> str:
@@ -419,11 +438,23 @@ class Build:
             if tf == "1d":
                 self.pack[symbol] = pack_row(d, self.fx)
 
+    def note_spliced(self, symbol, tf, d, old):
+        with self.lock:
+            self.notes.append(f"{symbol} {tf}: the provider sent {len(d['t'])} bars for the whole history; kept the {len(old['t'])} published and joined the new ones on")
+
     # one core series: always fresh; if the provider fails, keep what is published
     def core(self, job):
         symbol, tf = job
         try:
             d = self.yahoo(symbol, tf, CORE_RANGE.get(tf))
+            try:
+                old = self.previous_series(tf, symbol)
+            except Unreachable:
+                old = None
+            spliced = splice_truncated(old, d)
+            if spliced:
+                self.note_spliced(symbol, tf, d, old)
+                d = spliced
             if tf == "1m" and d["meta"].get("type") in server.STOCK_TYPES:
                 try:
                     self.ext_prints(symbol, d["t"][-1])
@@ -484,6 +515,10 @@ class Build:
                     return symbol, tf, "fresh"
             d = self.yahoo(symbol, tf, want, tries=2)
             d["full"], d["rng"] = d.get("fetched", 0), want
+            spliced = splice_truncated(old, d)
+            if spliced:
+                self.note_spliced(symbol, tf, d, old)
+                d = spliced
             self.write(d, tier, keep[tf], True)
             return symbol, tf, "fresh"
         except Exception as e:
@@ -611,7 +646,7 @@ def main():
     # do proportionally more, so the extended set keeps to its targets
     scale = min(3, max(1, (now - last_build) / 600)) if last_build and "budget" not in opts else 1
     b.budget = int(scale * b.budget)
-    broad_budget = int(scale * (int(opts["budget"]) if "budget" in opts else BROAD_BUDGET))
+    broad_budget = int(scale * (int(opts["budget"]) if "budget" in opts else BROAD_BUDGET * len(BROAD_PART[part])))
     # The market is in session only if the clock says so AND today has traded. On a holiday the
     # last session is the one SPY last traded in, not today's 16:00.
     trading, closed = stock_session(now), last_close(now)

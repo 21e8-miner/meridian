@@ -264,11 +264,18 @@ def parse_chart(doc: dict, symbol: str, tf: str) -> dict:
     has_volume = bool(V) and any(x for x in V if x)
     session_end = ((meta.get("currentTradingPeriod") or {}).get("regular") or {}).get("end")
     off_cache: dict[int, int] = {}
+    # a stock, fund or coin cannot trade at zero: a zero open, high or low is the provider's blank
+    # (early days of a coin, some old rows). Rates, indexes and futures can be at or below zero.
+    priced = (meta.get("instrumentType") or "") in ("EQUITY", "ETF", "CRYPTOCURRENCY", "MUTUALFUND")
     t_out, o_out, h_out, l_out, c_out, v_out, a_out = [], [], [], [], [], [], []
     for i, t in enumerate(ts):
         o, h, l, c = O[i], H[i], L[i], C[i]
         if o is None or h is None or l is None or c is None or c <= 0:
             continue
+        if priced and (o <= 0 or h <= 0 or l <= 0):
+            o = o if o > 0 else c
+            h = h if h > 0 else max(o, c)
+            l = l if l > 0 else min(o, c)
         v = V[i] if V and V[i] is not None else 0
         adj = ADJ[i] if ADJ and i < len(ADJ) and ADJ[i] is not None and ADJ[i] > 0 else c
         if daily:

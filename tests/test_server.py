@@ -241,7 +241,7 @@ fam_all = {s for v in snap.UNIVERSE["families"].values() for s in v}
 check("Vanguard and the other big issuers have lists; their busiest funds get five-minute bars, the rest daily and hourly",
       {"Vanguard", "iShares", "SPDR", "Schwab", "Invesco"} <= set(snap.UNIVERSE["families"]) and {"VGT", "VYM", "VHT", "VT"} <= set(snap.EXTENDED) | set(snap.CORE)
       and len(snap.UNIVERSE["families"]["Vanguard"]) >= 90 and len(fam_all & (set(snap.CORE) | set(snap.EXTENDED) | set(snap.BROAD))) >= 0.85 * len(fam_all))
-check("broad tier: daily and hourly, disjoint from the others, refreshed less often", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d", "1h"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.5)
+check("broad tier: daily and hourly, disjoint from the others, refreshed less often", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d", "1h", "5m"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.5)
 check("the two tiers do not overlap, and every proxied symbol is core", not set(snap.CORE) & set(snap.EXTENDED) and set(server.LIVE_PROXY) | set(server.STOCK_PROXY) <= set(snap.CORE) and len(snap.EXTENDED) > 350)
 # cache housekeeping
 import tempfile
@@ -340,10 +340,10 @@ check("format: times off any grid still round-trip (one-second steps)", snap.enc
 back = {**ser, "t": [0, 3600, 3600, 7200, 10800]}
 check("format: times that do not rise are published as they are", snap.encode_series(back)["t"] == back["t"])
 check("format: a plain file passes through decoding unchanged", snap.decode_series(ser) is ser and snap.decode_series(None) is None)
-check("broad tier keeps ten years of daily bars and eight months of hourly", snap.BROAD_KEEP == {"1d": 2520, "1h": 1200} and snap.BROAD_RANGE == {"1d": "10y", "1h": "1y"})
+check("broad tier keeps ten years of daily bars, eight months of hourly and two weeks of five-minute", snap.BROAD_KEEP == {"1d": 2520, "1h": 1200, "5m": 780} and snap.BROAD_RANGE == {"1d": "10y", "1h": "1y", "5m": "1mo"} and "5m" in snap.BROAD_TARGET)
 check("extended tier and coins have five-minute bars too (15m and 30m are built from them)", snap.EXT_KEEP["5m"] > 1000 and snap.EXT_RANGE["5m"] == "1mo" and "5m" in snap.EXT_TARGET and "5m" in snap.JOIN_RANGE)
-check("a split data set publishes the broad tier's daily history on the data site and its hourly on the main one",
-      snap.BROAD_PART["broad"] == ("1d",) and snap.BROAD_PART["main"] == ("1h",) and set(snap.BROAD_PART["all"]) == set(snap.BROAD_KEEP))
+check("a split data set publishes the broad tier's daily and 5-minute history on the data site and its hourly on the main one",
+      snap.BROAD_PART["broad"] == ("1d", "5m") and snap.BROAD_PART["main"] == ("1h",) and set(snap.BROAD_PART["all"]) == set(snap.BROAD_KEEP))
 check("history range: files from before it was recorded count as five years (broad daily) or the current window",
       snap.history_range({"tf": "1d"}, 3) == "5y" and snap.history_range({"tf": "1h"}, 3) == "1y" and snap.history_range({"tf": "1d"}, 2) == "10y" and snap.history_range({"tf": "1d", "rng": "10y"}, 3) == "10y")
 # joining works for intraday bars too, and remembers how far back the history went
@@ -351,6 +351,25 @@ def hser(hours, closes, fetched=0):
     return {"symbol": "X", "tf": "1h", "t": [x * 3600 for x in hours], "o": list(closes), "h": list(closes), "l": list(closes), "c": list(closes), "v": [1] * len(hours), "meta": {}, "fetched": fetched}
 jh = snap.join_series({**hser(range(0, 50), [float(i) for i in range(50)], 4), "rng": "1y", "full": 4}, hser(range(40, 55), [float(i) for i in range(40, 49)] + [49.5] + [float(i) for i in range(50, 55)], 8))
 check("join: hourly bars join like days; the range of the whole fetch is kept", jh is not None and len(jh["t"]) == 55 and jh["c"][49] == 49.5 and jh["rng"] == "1y" and jh["full"] == 4 and jh["fetched"] == 8)
+# provider blanks: a zero open/high/low on a stock or coin is repaired, a rate or a future may be zero or negative
+def zdoc(kind, rows):
+    d = doc([86400 * 20000 + 86400 * i for i in range(len(rows))], rows, tz="UTC")
+    d["chart"]["result"][0]["meta"]["instrumentType"] = kind
+    return d
+zc = server.parse_chart(zdoc("CRYPTOCURRENCY", [[0, 750.7, 0, 428.4, 5], [430, 440, 0, 435, 5], [0.0106, 0.0108, 0.0, 0.0106, 1]]), "ICP-USD", "1d")
+check("zero prices: a coin's blank open and low become the bar's own range", zc["o"] == [428.4, 430, 0.0106] and zc["l"] == [428.4, 430, 0.0106] and zc["h"] == [750.7, 440, 0.0108] and zc["c"] == [428.4, 435, 0.0106])
+zr = server.parse_chart(zdoc("INDEX", [[0.1, 0.1, -0.013, 0.003, 0], [0.0, 0.02, 0.0, 0.013, 0]]), "^IRX", "1d")
+check("zero prices: a rate at or below zero is left as it is", zr["l"] == [-0.013, 0.0] and zr["o"] == [0.1, 0.0])
+# a whole-series fetch that comes back truncated must not replace the published history
+pub = dser(range(100, 200), [10 + i * 0.1 for i in range(100)], fetched=5)
+pub["full"], pub["rng"] = 5, "10y"
+short = dser([198, 199, 200, 201], [10 + 9.8, 10 + 9.9, 20.05, 20.2], fetched=9)
+sp = snap.splice_truncated(pub, short)
+check("truncated answer: published history kept, fresh bars joined on", sp is not None and len(sp["t"]) == 102 and sp["t"][0] == 100 * 86400 and sp["c"][-1] == 20.2 and sp["fetched"] == 9 and sp["rng"] == "10y" and sp["full"] == 5)
+check("truncated answer: a full-length answer, one starting as early, or one far past the end is used as it is",
+      snap.splice_truncated(pub, dser(range(120, 202), [1.0] * 82)) is None and snap.splice_truncated(pub, dser([100, 101, 102], [10, 10.1, 10.2])) is None
+      and snap.splice_truncated(pub, dser([215, 216], [30, 31])) is None and snap.splice_truncated(None, short) is None)
+check("truncated answer: one that disagrees with the published bars (a split) is used as it is", snap.splice_truncated(pub, dser([197, 198, 199, 200], [9.95, 9.9, 9.95, 10.1])) is None)
 import time
 # a refresh fetches the whole series again when the carried one does not reach as far back as is kept
 with tempfile.TemporaryDirectory() as tdir:
@@ -369,5 +388,12 @@ with tempfile.TemporaryDirectory() as tdir:
         check(f"refresh: carried broad daily history fetched as {rng_kept or 'five years'} -> asks for {want}", res[2] == "fresh" and asked == [want], str((res, asked)))
     written = snap.decode_series(json.load(open(os.path.join(outd, "data", "1d", "ZZQ.json"))))
     check("refresh: a joined series keeps the range its history was fetched with", written.get("rng") == "10y")
+    # a weekly whole fetch that comes back truncated keeps the published history
+    carried = {**pub, "symbol": "ZZQ", "full": int(time.time()) - 30 * 86400, "fetched": int(time.time()) - 3600, "meta": {"type": "EQUITY"}}
+    json.dump(snap.encode_series(carried), open(os.path.join(prevd, "data", "1d", "ZZQ.json"), "w"))
+    bld.yahoo = lambda sym, tf, rng=None, tries=4: {**short, "symbol": "ZZQ", "meta": {"type": "EQUITY"}}
+    res = bld.refresh(("ZZQ", "1d"))
+    written = snap.decode_series(json.load(open(os.path.join(outd, "data", "1d", "ZZQ.json"))))
+    check("refresh: a truncated whole fetch keeps the published history and says so", res[2] == "fresh" and len(written["t"]) == 102 and any("kept the 100 published" in n for n in bld.notes), str((res, len(written["t"]), bld.notes)))
     snap.TIER.pop("ZZQ")
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)
