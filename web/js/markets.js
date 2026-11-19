@@ -19,7 +19,8 @@ const TYPE_GROUP = { ETF: 'ETFs', FUTURE: 'Futures', INDEX: 'Indexes', CURRENCY:
 // dollars; for indexes, futures and currencies the feed's volume cannot be turned into dollars,
 // so there is no figure (0).
 export function packFromBars(b) {
-  const n = b.t.length, type = b.meta && b.meta.type, kind = type === 'EQUITY' || type === 'ETF' ? 1 : type === 'CRYPTOCURRENCY' ? 2 : 0;
+  // (another currency: no dollar figure here; the shared page's summary file converts it)
+  const n = b.t.length, type = b.meta && b.meta.type, usd = !b.meta || !b.meta.currency || b.meta.currency === 'USD', kind = !usd ? 0 : type === 'EQUITY' || type === 'ETF' ? 1 : type === 'CRYPTOCURRENCY' ? 2 : 0;
   let k = n - 1;
   while (k > 0 && b.t[k - 1] >= b.t[n - 1] - PACK_DAYS * 86400) k--;
   const lo = Math.max(0, n - 21);
@@ -109,7 +110,10 @@ let root, cfg, lists = {}, rows = [], loadedFor = null, loadSeq = 0, focus = nul
 const persist = () => store.set('mk.cfg', cfg);
 const clock = (s) => new Date(s * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const money = (v) => (v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` : v >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` : `$${Math.round(v / 1e3)}K`);
-const groupOf = (r) => r.sector || TYPE_GROUP[r.type] || 'Other';
+// Group by sector; a list that mixes markets groups the foreign ones by their index instead, so
+// Japan's banks and America's are not one tile group
+let mixed = false;
+const groupOf = (r) => (mixed && r.mkt ? r.mkt : r.sector || r.mkt || TYPE_GROUP[r.type] || 'Other');
 
 async function load() {
   const my = ++loadSeq, syms = lists[cfg.list] || [], be = await backend(), ix = be.info();
@@ -124,7 +128,7 @@ async function load() {
     for (const sym of syms) {
       const row = pk.s[sym], e = ix.by.get(sym); if (!row || !e) continue;
       const p = decodePack(row);
-      out.push({ sym, name: e.name, type: e.type, sector: e.sector != null ? ix.sectors[e.sector] : null, f: p.f, s: stats(p) });
+      out.push({ sym, name: e.name, type: e.type, sector: e.sector != null ? ix.sectors[e.sector] : null, mkt: e.mkt || null, cur: e.cur || null, f: p.f, s: stats(p) });
     }
   } else {
     const st = root.querySelector('.mk-note');
@@ -137,12 +141,13 @@ async function load() {
   }
   if (my !== loadSeq) return; // a newer request owns the view; this one must leave no trace
   built = stamp;
-  // A symbol whose newest bar is older than its kind's newest has not been read since the session
-  // changed (the wider list is refreshed in turns). Its "1 day" change is yesterday's: say so
-  // instead of mixing sessions.
-  const newest = {};
-  for (const r of out) newest[r.type] = Math.max(newest[r.type] || 0, r.s.t);
-  for (const r of out) r.old = r.s.t < newest[r.type];
+  // A symbol whose newest bar is older than its kind's newest (in the same market: Tokyo's day
+  // starts before New York's) has not been read since the session changed (the wider list is
+  // refreshed in turns). Its "1 day" change is yesterday's: say so instead of mixing sessions.
+  const newest = {}, kindOf = (r) => r.type + '|' + (r.mkt || '');
+  for (const r of out) newest[kindOf(r)] = Math.max(newest[kindOf(r)] || 0, r.s.t);
+  for (const r of out) r.old = r.s.t < newest[kindOf(r)];
+  mixed = new Set(out.map((r) => r.mkt || '')).size > 1;
   rows = out; loadedFor = cfg.list;
   const fs = rows.map((r) => r.f).filter(Boolean);
   note = !rows.length ? '' : shared
@@ -222,7 +227,7 @@ function draw() {
     if (!r) { tip.hidden = true; return; }
     clear(tip);
     tip.append(h('div', null, h('b', null, r.sym), ' ', h('span', { class: 'muted' }, r.name)),
-      val(r) === val(r) ? h('div', null, fmtPrice(r.s.last), ' ', h('b', { class: val(r) >= 0 ? 'up' : 'dn' }, fmtPct(val(r))), h('span', { class: 'muted' }, ` over ${perName}`))
+      val(r) === val(r) ? h('div', null, fmtPrice(r.s.last) + (r.cur ? ' ' + (r.cur === 'GBp' ? 'pence' : r.cur) : ''), ' ', h('b', { class: val(r) >= 0 ? 'up' : 'dn' }, fmtPct(val(r))), h('span', { class: 'muted' }, ` over ${perName}`))
         : h('div', null, fmtPrice(r.s.last), ' ', h('span', { class: 'muted' }, r.old ? `newest bar is ${fmtDate(r.s.t)}: not read yet this session` : `no figure for ${perName}`)),
       h('div', { class: 'muted' }, PERIODS.filter(([id]) => id !== per).map(([id]) => `${id} ${fmtPct(r.s.chg[id], 1)}`).join(' · ')),
       h('div', { class: 'muted' }, `${r.s.dv ? `${money(r.s.dv)} a day` : 'no dollar-volume figure'} · ${r.s.atHigh ? '52-week closing high' : r.s.atLow ? '52-week closing low' : r.s.fromHigh === r.s.fromHigh ? `${fmtPct(r.s.fromHigh, 1)} from 52-week high` : 'under a year of history'} · read ${clock(r.f)}`));

@@ -53,6 +53,7 @@ check('median', median([3, 1, 2]) === 2 && median([4, 1, 2, 3]) === 2.5 && media
   check('pack: about a year of closes, ending at the newest bar', p.t[p.t.length - 1] === b.t[n9 - 1] && p.c[p.c.length - 1] === b.c[n9 - 1] && p.t[0] >= b.t[n9 - 1] - 375 * D && b.t[n9 - p.t.length - 1] < b.t[n9 - 1] - 375 * D);
   check('pack: dollar volume is the 20 bars before the newest', p.dv === Math.floor(sum / 20 + 0.5));
   let vs = 0; for (let i = n9 - 21; i < n9 - 1; i++) vs += b.v[i];
+  check('pack: a stock priced in another currency has no dollar figure here (the shared summary converts it)', packFromBars({ ...b, meta: { type: 'EQUITY', currency: 'JPY' } }).dv === 0 && packFromBars({ ...b, meta: { type: 'EQUITY', currency: 'USD' } }).dv === p.dv);
   check('pack: crypto volume is already dollars; other kinds have no dollar figure', packFromBars({ ...b, meta: { type: 'CRYPTOCURRENCY' } }).dv === Math.floor(vs / 20 + 0.5) && ['INDEX', 'FUTURE', 'CURRENCY', undefined].every((k) => packFromBars({ ...b, meta: { type: k } }).dv === 0));
   const row = { d0: p.t[0] / D, dd: p.t.slice(1).map((x, i) => (x - p.t[i]) / D), c: p.c, dv: p.dv, f: 7 }, back = decodePack(row);
   check('pack: decoding restores the dates', JSON.stringify(back.t) === JSON.stringify(p.t) && back.f === 7 && back.dv === p.dv); }

@@ -40,7 +40,7 @@ def probe(symbol: str) -> dict:
     c, v = q.get("close") or [], q.get("volume") or []
     rows = [(x, y) for x, y in zip(c, v) if x is not None and y is not None][-21:-1] or [(x, y) for x, y in zip(c, v) if x is not None and y is not None]
     dv = sum(x * y for x, y in rows) / len(rows) if rows else 0
-    return {"dv": round(dv), "type": meta.get("instrumentType") or "", "first": meta.get("firstTradeDate"), "name": meta.get("longName") or meta.get("shortName") or ""}
+    return {"dv": round(dv), "type": meta.get("instrumentType") or "", "first": meta.get("firstTradeDate"), "name": meta.get("longName") or meta.get("shortName") or "", "cur": meta.get("currency") or ""}
 
 
 def main():

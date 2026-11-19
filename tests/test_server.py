@@ -225,6 +225,14 @@ with tempfile.TemporaryDirectory() as tdir:
                {"symbol": "TAIL", "companyName": "Cambria Tail Risk ETF"}, {"symbol": "SPY", "companyName": "SPDR S&P 500 ETF Trust"}, {"symbol": "WT^X", "companyName": "WisdomTree odd listing"}]}}}, open(pth, "w"))
     fam = mu.families_from(pth)
 check("fund families: every fund named for the issuer, odd listings left out", fam == {"WisdomTree": ["DXJ"], "Cambria": ["TAIL"], "Alpha Architect": ["QVAL"]}, str(fam))
+check("world sectors map onto the GICS names, unknown ones stay blank", [mu.SECTORS[mu.sector_of(x)] if mu.sector_of(x) >= 0 else None for x in ("Banks", "Electric Machinery", "Electric Power", "Real Estate Investment Trusts", "Oil & Gas Producers", "Pharmaceuticals and Biotechnology", "Industrial Transportation", "Food Producers", "Services")]
+      == ["Financials", "Information Technology", "Utilities", "Real Estate", "Energy", "Health Care", "Industrials", "Consumer Staples", None])
+eq = {**pd_, "meta": {"type": "EQUITY", "currency": "JPY"}}
+fx = {"JPY": 1 / 150, "GBP": 1.25}
+check("pack row: another currency is converted to dollars, pence as hundredths of a pound, and left blank without a rate",
+      abs(snap.pack_row(eq, fx)["dv"] - int(want / 150 + 0.5)) <= 1 and abs(snap.pack_row({**pd_, "meta": {"type": "EQUITY", "currency": "GBp"}}, fx)["dv"] - int(want * 1.25 / 100 + 0.5)) <= 1
+      and snap.pack_row(eq)["dv"] == 0 and snap.pack_row({**pd_, "meta": {"type": "EQUITY", "currency": "SEK"}}, fx)["dv"] == 0 and snap.pack_row({**pd_, "meta": {"type": "EQUITY", "currency": "USD"}}, fx)["dv"] == int(want + 0.5))
+check("coins and world stocks have tiers of their own, apart from the others", not set(snap.CRYPTO) & (set(snap.CORE) | set(snap.EXTENDED) | set(snap.BROAD)) and set(snap.MKT_OF) <= set(snap.BROAD) and len(snap.CRYPTO) > 50 and len(snap.MKT_OF) > 800 and all(c in snap.FX_PAIRS for c in ("JPY", "GBP", "EUR", "HKD", "SEK", "AUD", "CAD", "INR", "CHF")) and all(p in snap.CORE for p, _ in snap.FX_PAIRS.values()))
 check("fund families are published with daily and hourly history", {"QVAL", "IVAL", "TAIL", "SYLD", "DXJ", "USFR", "BOXX"} <= set(snap.EXTENDED) and all(len(v) >= 10 for v in snap.UNIVERSE["families"].values()))
 check("broad tier: daily only, disjoint from the others, refreshed hourly", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.75)
 check("the two tiers do not overlap, and every proxied symbol is core", not set(snap.CORE) & set(snap.EXTENDED) and set(server.LIVE_PROXY) | set(server.STOCK_PROXY) <= set(snap.CORE) and len(snap.EXTENDED) > 350)

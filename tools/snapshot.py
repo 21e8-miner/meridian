@@ -32,6 +32,7 @@ Two tiers, so the data set can be wide without hammering the provider:
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 import os
 import shutil
@@ -65,12 +66,18 @@ CORE = sorted(set(
        "ORCL KO CVX MRK AMD PEP PLTR ADBE QCOM IBM BA DIS").split()
     + "ZC=F ZS=F ZW=F KC=F SB=F CC=F LE=F HE=F PL=F PA=F HO=F RB=F 6J=F 6B=F 6A=F 6C=F BTC=F ETH=F".split()
     + "^IXIC ^SOX ^NYA ^N225 ^FTSE ^GDAXI ^HSI ^STOXX50E ^FCHI ^KS11 ^BSESN ^GSPTSE ^AXJO ^TYX ^FVX ^IRX ^VVIX ^MOVE DX-Y.NYB".split()
-    + "USDCHF=X NZDUSD=X EURJPY=X GBPJPY=X EURGBP=X USDCNH=X USDMXN=X USDINR=X USDKRW=X".split()
+    + "USDCHF=X NZDUSD=X EURJPY=X GBPJPY=X EURGBP=X USDCNH=X USDMXN=X USDINR=X USDKRW=X USDHKD=X USDSEK=X".split()
     + "AVAX-USD DOT-USD LTC-USD BCH-USD TRX-USD XLM-USD SHIB-USD HBAR-USD NEAR-USD AAVE-USD UNI7083-USD SUI20947-USD".split()
 ))
 EXTENDED = sorted((set(UNIVERSE["stocks"]) | set(UNIVERSE.get("etfs") or [])) - set(CORE))
-BROAD = sorted(set(UNIVERSE.get("broad") or {}) - set(CORE) - set(EXTENDED))
-SECTOR_OF = {**{k: v for k, v in (UNIVERSE.get("broad") or {}).items() if v >= 0}, **UNIVERSE["stocks"]}
+# coins: daily and hourly like the extended tier, but refreshed around the clock
+CRYPTO = [s for s in (UNIVERSE.get("crypto") or []) if s not in set(CORE) | set(EXTENDED)]
+# international index members: daily history, grouped by index
+MKT_OF = {s: name for name, v in (UNIVERSE.get("intl") or {}).items() for s in v["members"]}
+BROAD = sorted((set(UNIVERSE.get("broad") or {}) | set(MKT_OF)) - set(CORE) - set(EXTENDED) - set(CRYPTO))
+SECTOR_OF = {**{k: v for k, v in (UNIVERSE.get("broad") or {}).items() if v >= 0},
+             **{s: sec for v in (UNIVERSE.get("intl") or {}).values() for s, sec in v["members"].items() if sec >= 0},
+             **UNIVERSE["stocks"]}
 SP500 = set(UNIVERSE.get("sp500") or [])
 
 # timeframe -> how many of the most recent bars to keep (15m and 30m are built from 5m in the page)
@@ -84,6 +91,13 @@ EXT_BUDGET = 320       # extended refreshes per build, beyond series the site do
 BROAD_KEEP = {"1d": 2520}
 BROAD_TARGET = {"1d": 60 * 60}
 BROAD_BUDGET = 700     # broad refreshes per build (each is a small request: a month of bars)
+CRYPTO_BUDGET = 120    # coin refreshes per build
+# currency -> its value in US dollars, from these core pairs (True: the pair is quoted as USD per unit)
+FX_PAIRS = {"EUR": ("EURUSD=X", True), "GBP": ("GBPUSD=X", True), "AUD": ("AUDUSD=X", True), "NZD": ("NZDUSD=X", True),
+            "JPY": ("USDJPY=X", False), "CAD": ("USDCAD=X", False), "CHF": ("USDCHF=X", False), "INR": ("USDINR=X", False),
+            "KRW": ("USDKRW=X", False), "CNY": ("USDCNH=X", False), "MXN": ("USDMXN=X", False), "HKD": ("USDHKD=X", False),
+            "SEK": ("USDSEK=X", False)}
+SUBUNIT = {"GBp": ("GBP", 0.01), "GBX": ("GBP", 0.01), "ZAc": ("ZAR", 0.01), "ILA": ("ILS", 0.01)}  # quoted in hundredths
 FULL_EVERY = 7 * 86400  # a joined-up series is fetched whole again after this long, whatever it looks like
 SETTLE = 30 * 60       # a day's last bars are final this long after the close
 DEADLINE = 330         # seconds into the build after which no new extended refresh starts
@@ -181,7 +195,7 @@ def join_daily(old: dict, new: dict) -> dict | None:
 
 
 # ───────────────────────── market summary (pure) ─────────────────────────
-def pack_row(d: dict) -> dict:
+def pack_row(d: dict, fx: dict | None = None) -> dict:
     """The last year of a daily series, small enough to ship for every symbol at once: dates as day
     numbers (first, then gaps), closes, and the average value traded a day over the 20 bars before
     the newest one. web/js/markets.js reads this (and builds the same thing from bars when a
@@ -189,9 +203,14 @@ def pack_row(d: dict) -> dict:
 
     Value traded is price x shares for stocks and ETFs. Crypto volume already comes in dollars.
     For indexes, futures and currencies the feed's volume cannot be turned into dollars (no
-    contract multiplier, constituent shares, or none at all), so there is no figure: 0."""
+    contract multiplier, constituent shares, or none at all), so there is no figure: 0.
+    A series priced in another currency is converted with `fx` (currency -> US dollars; London's
+    pence count as hundredths of a pound), or has no figure without it."""
     t, c, v = d["t"], d["c"], d["v"]
     kind = (d.get("meta") or {}).get("type")
+    cur = (d.get("meta") or {}).get("currency") or "USD"
+    base, unit = SUBUNIT.get(cur, (cur, 1.0))
+    rate = 1.0 if cur == "USD" else (fx or {}).get(base, 0) * unit
     n = len(t)
     k = n - 1
     while k > 0 and t[k - 1] >= t[-1] - PACK_DAYS * 86400:
@@ -199,7 +218,7 @@ def pack_row(d: dict) -> dict:
     days = [x // 86400 for x in t[k:]]
     lo = max(0, n - 21)
     per = (lambda i: c[i] * v[i]) if kind in server.STOCK_TYPES else (lambda i: v[i]) if kind == "CRYPTOCURRENCY" else (lambda i: 0)
-    dv = sum(per(i) for i in range(lo, n - 1)) / max(1, n - 1 - lo)
+    dv = sum(per(i) for i in range(lo, n - 1)) / max(1, n - 1 - lo) * rate
     return {"d0": days[0], "dd": [days[i] - days[i - 1] for i in range(1, len(days))], "c": c[k:], "dv": int(dv + 0.5), "f": d.get("fetched", 0)}
 
 
@@ -221,6 +240,7 @@ class Build:
         self.state: dict[str, int] = {}   # "SYM|tf" -> when that extended series was fetched
         self.pack: dict[str, dict] = {}
         self.notes: list[str] = []
+        self.fx: dict[str, float] = {}   # currency -> US dollars, read from the core pairs once they are in
         self.joined = 0                   # daily refreshes done by joining a month onto the carried history
 
     def path(self, tf: str, symbol: str) -> str:
@@ -291,10 +311,14 @@ class Build:
                 e["sector"] = SECTOR_OF[symbol]
             if symbol in SP500:
                 e["sp"] = 1
+            if symbol in MKT_OF:
+                e["mkt"] = MKT_OF[symbol]
+            if (meta.get("currency") or "USD") != "USD":
+                e["cur"] = meta["currency"]
             if tier >= 2:
                 self.state[f"{symbol}|{tf}"] = d.get("fetched", 0)
             if tf == "1d":
-                self.pack[symbol] = pack_row(d)
+                self.pack[symbol] = pack_row(d, self.fx)
 
     # one core series: always fresh; if the provider fails, keep what is published
     def core(self, job):
@@ -381,6 +405,33 @@ class Build:
         return symbol, tf, "carried"
 
 
+def stamp_assets(out: str) -> str:
+    """Give every script and stylesheet address a version (a hash of the whole app), so a browser
+    holding an earlier build's files fetches them all again instead of mixing old and new. The
+    site serves files as fresh for ten minutes; without this a page could run one new module with
+    another's old copy. An unchanged app keeps its version, and so its cache."""
+    files = sorted(os.path.join(dp, fn) for dp, _, fns in os.walk(out) for fn in fns if fn.endswith((".js", ".css", ".html")) and "/data/" not in dp + "/")
+    h = hashlib.sha1()
+    for path in files:
+        with open(path, "rb") as f:
+            h.update(path[len(out):].encode() + b"\0" + f.read())
+    ver = h.hexdigest()[:10]
+    imp = re.compile(r"""((?:\bfrom\s*|\bimport\s*\(\s*)(['"]))(\.{1,2}/[^'"?]+\.js)(\2)""")
+    for path in files:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if path.endswith(".js"):
+            new = imp.sub(lambda m: f"{m.group(1)}{m.group(3)}?v={ver}{m.group(4)}", text)
+        elif path.endswith(".html"):
+            new = re.sub(r'((?:src|href)=")((?:js|css)/[^"?]+\.(?:js|css))(")', lambda m: f"{m.group(1)}{m.group(2)}?v={ver}{m.group(3)}", text)
+        else:
+            new = text
+        if new != text:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new)
+    return ver
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     opts = dict(a[2:].split("=", 1) if "=" in a else (a[2:], "") for a in sys.argv[1:] if a.startswith("--"))
@@ -388,8 +439,8 @@ def main():
     testing = len(args) > 1 or "ext" in opts or "broad" in opts
     pick = lambda k, full: [s.upper() for s in opts[k].split(",") if s] if k in opts else ([] if testing else full)
     core = [s.upper() for s in args[1:]] or ([] if testing else CORE)
-    extended, broad = pick("ext", EXTENDED), pick("broad", BROAD)
-    TIER.update({s: (2, EXT_KEEP) for s in extended})
+    extended, broad, crypto = pick("ext", EXTENDED), pick("broad", BROAD), pick("crypto", CRYPTO)
+    TIER.update({s: (2, EXT_KEEP) for s in extended + crypto})
     TIER.update({s: (3, BROAD_KEEP) for s in broad})
     site = opts.get("site") or os.environ.get("MERIDIAN_SITE") or None
     if site and not site.endswith("/"):
@@ -410,18 +461,27 @@ def main():
         html = f.read()
     with open(page, "w") as f:
         f.write(html.replace("<html lang=\"en\">", "<html lang=\"en\" data-backend=\"static\">", 1))
+    stamp_assets(out)
 
     # core: everything, every build
     jobs = [(s, tf) for s in core for tf in KEEP]
     with ThreadPoolExecutor(max_workers=4) as pool:
         core_res = list(pool.map(b.core, jobs))
     core_bad = [r for r in core_res if r[2] != "fresh"]
+    for cur, (pair, direct) in FX_PAIRS.items():
+        try:
+            with open(b.path("1d", pair)) as f:
+                last = json.load(f)["c"][-1]
+            b.fx[cur] = last if direct else 1.0 / last
+        except Exception:
+            pass  # that currency's dollar figures stay blank
     t_core = time.time() - b.t0
 
     # extended and broad: refresh what is due, carry the rest from the previous build
+    keysc = [(s, tf) for s in crypto for tf in EXT_KEEP]
     keys2 = [(s, tf) for s in extended for tf in EXT_KEEP]
     keys3 = [(s, tf) for s in broad for tf in BROAD_KEEP]
-    keys = keys2 + keys3
+    keys = keys2 + keysc + keys3
     now = time.time()
     try:
         prev = (b.previous("state.json") or {}) if keys else {}
@@ -447,7 +507,8 @@ def main():
             closed = min(closed, datetime(d.tm_year, d.tm_mon, d.tm_mday, 16, 0, tzinfo=server.ET).timestamp())
     due2, rest2 = plan_refresh(prev, keys2, now, b.budget, trading, closed)
     due3, rest3 = plan_refresh(prev, keys3, now, broad_budget, trading, closed, BROAD_TARGET)
-    due, rest = due2 + due3, rest2 + rest3
+    duec, restc = plan_refresh(prev, keysc, now, int(scale * CRYPTO_BUDGET), True, closed)  # crypto never closes
+    due, rest = due2 + duec + due3, rest2 + restc + rest3
     with ThreadPoolExecutor(max_workers=4) as pool:
         ref = list(pool.map(b.refresh, due))
     undone = [(s, tf) for s, tf, r in ref if r != "fresh"]  # put off or refused: keep what was published
@@ -473,7 +534,7 @@ def main():
 
     # index (small, polled by the page), catalog (the symbol list, fetched when it changes),
     # state (for the next build), and the market summary
-    order = {s: i for i, s in enumerate(core + extended + broad)}
+    order = {s: i for i, s in enumerate(core + extended + crypto + broad)}
     symbols = sorted(b.info.values(), key=lambda e: order.get(e["symbol"], 1e9))
     for e in symbols:
         e["tfs"] = [tf for tf in list(KEEP) + ["x1m"] if tf in e["tfs"]]
@@ -482,6 +543,8 @@ def main():
         "sectors": UNIVERSE["sectors"],
         # fund families with a list of their own in the app: issuer -> funds published in this build
         "families": {k: [x for x in v if x in b.info] for k, v in (UNIVERSE.get("families") or {}).items() if any(x in b.info for x in v)},
+        # world indexes: name -> {country, members published in this build}
+        "indexes": {k: {"country": v["country"], "members": [x for x in v["members"] if x in b.info]} for k, v in (UNIVERSE.get("intl") or {}).items() if any(x in b.info for x in v["members"])},
         "live": server.LIVE_PROXY,
         "stocks": server.STOCK_PROXY,
         "file": {e["symbol"]: safe(e["symbol"]) for e in symbols},
@@ -505,9 +568,10 @@ def main():
     size = sum(os.path.getsize(os.path.join(dp, fn)) for dp, _, fns in os.walk(data) for fn in fns)
     n_ext = len({s for s, _ in keys2} & set(b.info))
     n_broad = len({s for s, _ in keys3} & set(b.info))
+    n_coin = len({s for s, _ in keysc} & set(b.info))
     print(f"core: {len(jobs) - len(core_bad)} of {len(jobs)} series fresh in {t_core:.0f} s")
     print(f"extended: {len(due)} due ({sum(1 for r in ref if r[2] == 'fresh')} refreshed, {sum(1 for r in ref if r[2] is None)} put off), "
-          f"{sum(1 for r in car if r[2] == 'carried')} carried, {len(lost)} missing; {n_ext} of {len(extended)} extended and {n_broad} of {len(broad)} broad symbols; "
+          f"{sum(1 for r in car if r[2] == 'carried')} carried, {len(lost)} missing; {n_ext} of {len(extended)} extended, {n_coin} of {len(crypto)} coin and {n_broad} of {len(broad)} broad symbols; "
           f"{b.joined} daily refreshes joined onto carried history; market {'open' if trading else 'shut'}")
     ext_bad = [(s, tf, r) for (s, tf), r in refused.items() if b.state.get(f"{s}|{tf}", 0) > 0]  # refused but carried
     print(f"{len(catalog['symbols'])} symbols, {size / 1e6:.1f} MB, {b.throttled} throttled answers, {time.time() - b.t0:.0f} s")

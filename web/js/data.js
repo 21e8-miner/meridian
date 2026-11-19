@@ -133,10 +133,12 @@ export async function universes() {
   // the lightest list first: it is what a scan starts on
   put('Core set · every timeframe', (s) => !s.tier || s.tier === 1);
   put('S&P 500', (s) => s.sp);
-  put('US stocks', (s) => s.type === 'EQUITY');
-  (ix.sectors || []).forEach((name, k) => put(name, (s) => s.sector === k));
+  put('US stocks', (s) => s.type === 'EQUITY' && !s.mkt);
+  (ix.sectors || []).forEach((name, k) => put(name, (s) => s.sector === k && !s.mkt)); // US sectors; each world index has its own list
   put('ETFs', (s) => s.type === 'ETF');
   for (const [fam, list] of Object.entries(ix.families || {})) if (list.length) out[`${fam} ETFs (${list.length})`] = list;
+  put('International stocks', (s) => !!s.mkt);
+  for (const [name, v] of Object.entries(ix.indexes || {})) if (v.members.length) out[`${name} · ${v.country} (${v.members.length})`] = v.members;
   put('Futures', (s) => s.type === 'FUTURE');
   put('Indexes', (s) => s.type === 'INDEX');
   put('Currencies', (s) => s.type === 'CURRENCY');

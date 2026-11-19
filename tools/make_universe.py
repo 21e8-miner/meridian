@@ -4,6 +4,7 @@ Rebuild web/universe.json: the stock list, with sectors, that the shared page pu
 Markets view groups by.
 
     python3 tools/make_universe.py constituents.csv [screener.json] [--etfs=etf_screener.json] [--liquidity=liquidity.json]
+                                   [--intl=intl.json --crypto=crypto.json --checked=liquidity_intl.json]
 
 The CSV is the public S&P 500 constituents table (columns Symbol, Security, GICS Sector, ...), as
 kept at github.com/datasets/s-and-p-500-companies. A short hand-kept list of widely followed names
@@ -25,6 +26,11 @@ families are kept.
 its last 20 sessions. With it, "broad" also takes smaller stocks (market cap from SMALL_MIN_CAP)
 and any other ETF, as long as they trade at least STOCK_MIN_DV / ETF_MIN_DV a day. Run this again
 when the index changes; nothing else reads the input files.
+
+--intl and --crypto come from tools/fetch_lists.py (world index members from Wikipedia, the
+largest coins from CoinGecko matched to Yahoo tickers); --checked is tools/liquidity_probe.py run
+over them. Every index member the provider has data for is kept ("intl", daily history); coins
+that trade at least COIN_MIN_DV a day are kept ("crypto", daily and hourly).
 """
 from __future__ import annotations
 
@@ -65,6 +71,30 @@ BROAD_MIN_CAP = 2e9    # US stocks this big are always included
 SMALL_MIN_CAP = 2e8    # smaller ones, from this size, only if they trade enough (needs --liquidity)
 STOCK_MIN_DV = 5e6     # dollars traded a day, 20-session average
 ETF_MIN_DV = 2e6
+COIN_MIN_DV = 1e6      # crypto volume comes in dollars
+# Sector names used abroad (ICB, the exchanges' own, Wikipedia's wording) -> the GICS eleven, first
+# match wins. Anything that matches none is left without a sector.
+SECTOR_WORDS = [
+    ("Real Estate", r"real estate|reit|propert"),
+    ("Health Care", r"health|pharma|biotech|medic|drug"),  # before technology: "biotechnology"
+    ("Information Technology", r"technolog|software|semiconductor|electronic|electric machinery|precision instrument|it serv|computer"),
+    ("Communication Services", r"telecom|communication|media|entertainment|broadcast|publishing|internet"),
+    ("Financials", r"bank|financ|insur|securities|investment|asset manag|capital market|exchange"),
+    ("Energy", r"oil|petroleum|coal|energy|gas producer|mining.*fuel"),
+    ("Utilities", r"utilit|electric power|electricity|water|^gas$|gas, water"),
+    ("Materials", r"material|chemical|mining|metal|steel|paper|pulp|glass|ceramic|basic resource|rubber|forestry|cement|mineral"),
+    ("Consumer Staples", r"food|beverage|tobacco|staple|grocer|personal care|household product|agricultur|fishery|brew"),
+    ("Consumer Discretionary", r"auto|retail|discretionary|travel|leisure|hotel|apparel|textile|luxury|personal goods|consumer product|homebuild|household goods|restaurant|gaming|casino|consumer serv"),
+    ("Industrials", r"industr|aerospace|defen[cs]e|construct|machinery|transport|engineering|electrical equipment|shipping|shipbuild|rail|airline|air transport|logistic|trading compan|warehous|business serv|support serv|marine"),
+]
+
+
+def sector_of(text: str) -> int:
+    t = (text or "").lower()
+    for name, pat in SECTOR_WORDS:
+        if re.search(pat, t):
+            return SECTORS.index(name)
+    return -1
 NASDAQ_SECTOR = {"Technology": "Information Technology", "Telecommunications": "Communication Services", "Finance": "Financials",
                  "Basic Materials": "Materials", "Consumer Discretionary": "Consumer Discretionary", "Consumer Staples": "Consumer Staples",
                  "Health Care": "Health Care", "Industrials": "Industrials", "Energy": "Energy", "Utilities": "Utilities", "Real Estate": "Real Estate"}
@@ -152,6 +182,22 @@ def main():
         for sym in etfs_from(opts["etfs"], taken | set(broad), liq):
             broad[sym] = -1  # funds have no sector
         broad = dict(sorted(broad.items()))
+    intl, crypto = old.get("intl") or {}, old.get("crypto") or []
+    if "intl" in opts and "checked" in opts:
+        with open(opts["intl"]) as f:
+            lists = json.load(f)
+        with open(opts["checked"]) as f:
+            checked = json.load(f)
+        ok = lambda s: (checked.get(s) or {}).get("type") == "EQUITY" and not checked[s].get("gone")
+        intl = {name: {"country": v["country"], "members": {m[0]: sector_of(m[2]) for m in v["members"] if ok(m[0])}}
+                for name, v in lists.items()}
+        intl = {k: v for k, v in intl.items() if v["members"]}
+    if "crypto" in opts and "checked" in opts:
+        with open(opts["crypto"]) as f:
+            coins = json.load(f)
+        with open(opts["checked"]) as f:
+            checked = json.load(f)
+        crypto = [c["yahoo"] for c in coins if c.get("yahoo") and (checked.get(c["yahoo"]) or {}).get("type") == "CRYPTOCURRENCY" and checked[c["yahoo"]].get("dv", 0) >= COIN_MIN_DV]
     out = {
         "asof": time.strftime("%Y-%m-%d"),
         "sectors": SECTORS,
@@ -161,10 +207,13 @@ def main():
         "etfs": funds,
         "families": families,  # issuer -> its funds (all also in "etfs")
         "broad": broad,  # symbol -> sector index, -1 when the source had none (and for funds)
+        "intl": intl,  # index -> {country, members: {symbol: sector index or -1}}
+        "crypto": crypto,  # Yahoo tickers of the coins kept, largest first
         "rules": {"broad_min_cap": BROAD_MIN_CAP, "small_min_cap": SMALL_MIN_CAP, "stock_min_dv": STOCK_MIN_DV, "etf_min_dv": ETF_MIN_DV, "liquidity": liq is not None},
     }
     with open(path, "w") as f:
         json.dump(out, f, separators=(",", ":"))
+    print(f"{sum(len(v['members']) for v in intl.values())} international stocks in {len(intl)} indexes, {len(crypto)} coins")
     print(f"{len(stocks)} stocks ({n_index} index members), {len(funds)} funds ({', '.join(f'{k} {len(v)}' for k, v in families.items())}), {len(broad)} broad -> {path}")
 
 

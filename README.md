@@ -6,8 +6,8 @@ a small model lab and seasonality tables. One Python file serves it; the front e
 step and no dependencies.
 
 **Shared page:** https://21e8-miner.github.io/meridian/ — runs in the browser with no install, on
-about 5,000 symbols (every US stock over $2B and the liquid smaller ones, the S&P 500 with sectors,
-about 2,100 ETFs, futures,
+about 6,100 symbols (every US stock over $2B and the liquid smaller ones, the S&P 500 with sectors,
+about 2,100 ETFs, 940 stocks from 13 world indexes, 120 cryptocurrencies, futures,
 world indexes, currencies, crypto) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
 
 ## Run
@@ -148,13 +148,19 @@ The data set has two tiers, so it can be wide without flooding the provider with
 | --- | --- | --- | --- |
 | Core | 182: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
 | Extended | 711: the rest of the S&P 500 and other followed stocks, with sectors, about 100 more ETFs, and every WisdomTree, Cambria and Alpha Architect fund (each issuer has its own list in the Scanner and Markets) (`web/universe.json`) | hourly (about 10 months), 10 years daily | on a rolling basis: daily bars within about 30 minutes and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
-| Broad | 4,183: every other US-listed common stock over $2B market cap; smaller ones (from $200M) that trade at least $5M a day; and every other US ETF that trades at least $2M a day (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | 10 years daily | within about an hour while the market is open. A refresh asks for the last month only and joins it onto the carried history; if the two disagree on any shared day (a split or dividend restated the history) or the history is a week old, the whole series is fetched again |
+| Crypto | 102: the largest coins by market cap (CoinGecko) that trade at least $1M a day, each matched to the Yahoo ticker with the same price (several coins share a symbol) | hourly, daily | like extended, but around the clock: crypto never closes |
+| Broad | 5,126: every other US-listed common stock over $2B market cap; smaller ones (from $200M) that trade at least $5M a day; every other US ETF that trades at least $2M a day; and the members of 13 world indexes (FTSE 100, DAX 40, CAC 40, AEX, IBEX 35, FTSE MIB, SMI, OMX Stockholm 30, Nikkei 225, Hang Seng, S&P/TSX 60, S&P/ASX 200, NIFTY 50) from their Wikipedia articles, each with a list of its own (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | 10 years daily | within about an hour while the market is open. A refresh asks for the last month only and joins it onto the carried history; if the two disagree on any shared day (a split or dividend restated the history) or the history is a week old, the whole series is fetched again |
 
 A build fetches only the extended series that are due and carries the others over from the last
 published build, which the job downloads as it was uploaded (reading it back through the public
 site would spend the site's bandwidth allowance on its own upkeep; that route is only the fallback).
 Nothing else is stored. A symbol the provider stops answering for keeps its last published history,
 and a build that would lose a real share of what is published stops instead of replacing it.
+
+Foreign stocks are priced in their own currency; the Markets view converts their dollar volume
+with the core currency pairs. World markets are refreshed on the US schedule, so a market that
+has closed has its final bar within the day. Script and stylesheet addresses carry a build
+version, so a browser never runs a mix of two builds' code.
 
 What differs from running locally: only the listed symbols have history (plus any `XYZ:` live
 market); extended symbols have no timeframe shorter than an hour and broad ones nothing shorter
@@ -168,7 +174,7 @@ second, larger one only when a list includes broad symbols.
 To change the lists, edit `tools/make_universe.py` or feed it newer input files (its docstring
 says where each comes from) and run it. The liquidity cutoffs need `tools/liquidity_probe.py`
 first, which measures each candidate's dollar volume with one small request (about 11 minutes for
-7,000 symbols); `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
+7,000 symbols); and the world indexes and coins come from `tools/fetch_lists.py` (also probed before use); `CORE` in `tools/snapshot.py` is the list that gets every timeframe.
 
 ## Monitoring with Prometheus
 
