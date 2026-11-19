@@ -21,6 +21,7 @@ const run = {
   liveAnchor: (a) => S.liveAnchor(...a), anchorFrom1m: (a) => S.anchorFrom1m(...a),
   spliceLive: (a) => S.spliceLive(...a), spliceExt: (a) => S.spliceExt(...a),
   stockMinutes: (a) => S.stockMinutes(...a), mergeMinutes: (a) => S.mergeMinutes(...a), parseHl: (a) => S.parseHl(...a),
+  decode: (a) => S.decodeSeries(...a),
   pack: (a) => { const d = decodePack(a[1]); return { fromBars: packFromBars(a[0]), decoded: { t: d.t, c: d.c, dv: d.dv } }; },
 };
 const tally = {};

@@ -321,4 +321,12 @@ names = {n for n, _, _ in smp}
 check("metrics endpoint: valid exposition format with the right content type", not errs and ctype.startswith("text/plain; version=0.0.4"), str(errs[:3]) + " " + str(ctype))
 check("metrics endpoint: requests are counted by route and status", ("meridian_http_requests_total", '{route="health",code="200"}', "1") in smp and ("meridian_http_requests_total", '{route="unknown_api",code="404"}', "1") in smp, str([x for x in smp if x[0] == "meridian_http_requests_total"]))
 check("metrics endpoint: the families an alert rule reads are all there", {"meridian_upstream_requests_total", "meridian_http_request_duration_seconds_bucket", "meridian_cache_disk_bytes", "meridian_build_info", "meridian_start_time_seconds", "meridian_threads"} <= names and {"meridian_proxy_last_candle_age_seconds", "meridian_live_anchor_age_seconds", "meridian_cache_lookups_total", "meridian_live_fill_total"} <= set(fams), str(sorted(names))[:300])
+# the published file format
+ser = {"symbol": "S", "tf": "1d", "t": [86400 * d for d in (100, 101, 104, 105, 106)], "o": [1, 2, 3, 4, 5], "h": [1, 2, 3, 4, 5], "l": [1, 2, 3, 4, 5], "c": [10.0, 11.0, 12.0, 13.0, 14.0], "v": [5] * 5, "a": [9.9, 10.89, 11.88, 13.0, 14.0], "meta": {}, "fetched": 7}
+enc = snap.encode_series(ser); dec = snap.decode_series(json.loads(json.dumps(enc)))
+check("format: bar times as gaps in days, adjustment as factor runs, decoded exactly where it can be", enc["t0"] == 8640000 and enc["dt"] == [1, 3, 1, 1] and "t" not in enc and enc["af"] == [[0, 0.99], [3, 1.0]] and dec["t"] == ser["t"] and all(abs(x - y) <= 2e-5 * y for x, y in zip(dec["a"], ser["a"])) and dec["fetched"] == 7 and snap.encode_series(dec) == enc)
+odd = {**ser, "tf": "1h", "t": [0, 3600, 5400, 9000, 12600]}
+check("format: times off the bar grid are published as they are", snap.encode_series(odd)["t"] == odd["t"] and snap.decode_series(snap.encode_series(odd))["t"] == odd["t"])
+check("format: a plain file passes through decoding unchanged", snap.decode_series(ser) is ser and snap.decode_series(None) is None)
+check("broad tier keeps five years of daily bars", snap.BROAD_KEEP == {"1d": 1260} and snap.BROAD_RANGE == {"1d": "5y"})
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)

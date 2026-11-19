@@ -205,7 +205,9 @@ function draw() {
     clear(map);
     const W = map.clientWidth, H = map.clientHeight; if (W < 40 || H < 40) return;
     // symbols with no dollar-volume figure (indexes, futures, currencies) take the typical size
-    const sum = shown.reduce((s, g) => s + g.list.reduce((q, r) => q + (r.s.dv || 0), 0), 0), floor = sum * 0.0004;
+    // the smallest tile: a share of the whole, and at least a twentieth of an average one, so a short
+    // list shows every symbol even beside a giant
+    const count = shown.reduce((q, g) => q + g.list.length, 0), sum = shown.reduce((s, g) => s + g.list.reduce((q, r) => q + (r.s.dv || 0), 0), 0), floor = Math.max(sum * 0.0004, sum / Math.max(1, count * 20));
     const typical = median(shown.flatMap((g) => g.list.map((r) => r.s.dv || NaN))) || 1;
     const size = (r) => (cfg.size === 'eq' ? 1 : Math.max(r.s.dv || typical, floor, 1));
     const boxes = treemap(shown.map((g) => ({ g, v: g.list.reduce((s, r) => s + size(r), 0) })), 0, 0, W, H);

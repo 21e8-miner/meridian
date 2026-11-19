@@ -232,24 +232,59 @@ export async function proxyMinutes(coin, startS) {
 // ── the snapshot ──
 // data/stamp.json is tiny and says when the snapshot was built and which symbol list goes with it;
 // the list itself (data/catalog.json) is fetched again only when that changes.
-let index = null, indexAt = 0, catalogId = null, hlNames = null;
+// The data set can live on more than one site (tools/snapshot.py --part): this page's own, plus
+// the "shards" its catalog names, each with its own stamp, catalog and files. They are merged into
+// one index; a symbol remembers which site (`base`) its files are on. A shard that cannot be read
+// leaves its symbols out (or keeps the copy read before) and the rest of the page works.
+let index = null, indexAt = 0, hlNames = null;
+const sites = new Map(); // base ('' = this site) -> { id, generated, cat }
 const files = new Map(); // "tf|SYM" -> { g, data }
 async function getJson(url, opts) { const r = await fetch(url, opts); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
+async function readSite(base) {
+  const st = await getJson(`${base}data/stamp.json?m=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
+  const old = sites.get(base);
+  const cat = old && old.id === st.catalog ? old.cat : await getJson(`${base}data/catalog.json?c=${st.catalog}`);
+  const changed = !old || old.id !== st.catalog;
+  sites.set(base, { id: st.catalog, generated: st.generated, cat });
+  return changed;
+}
+function merge() {
+  const main = sites.get('').cat, ix = { ...main, symbols: [], file: {}, families: { ...(main.families || {}) }, indexes: { ...(main.indexes || {}) } };
+  for (const [base, site] of sites) {
+    for (const e of site.cat.symbols) { if (base && ix.file[e.symbol]) continue; ix.symbols.push(base ? { ...e, base } : e); ix.file[e.symbol] = site.cat.file[e.symbol]; }
+    if (base) { Object.assign(ix.families, site.cat.families || {}); Object.assign(ix.indexes, site.cat.indexes || {}); }
+  }
+  ix.by = new Map(ix.symbols.map((s) => [s.symbol, s]));
+  return ix;
+}
 async function loadIndex(force = false) {
   if (index && !force && Date.now() - indexAt < 60000) return index;
   try {
-    const st = await getJson(`data/stamp.json?m=${Math.floor(Date.now() / 60000)}`, { cache: 'no-store' });
-    if (!index || st.catalog !== catalogId) {
-      const cat = await getJson(`data/catalog.json?c=${st.catalog}`);
-      cat.by = new Map(cat.symbols.map((s) => [s.symbol, s]));
-      index = cat; catalogId = st.catalog;
+    let changed = await readSite('');
+    for (const sh of sites.get('').cat.shards || []) {
+      try { changed = (await readSite(sh.base)) || changed; } catch (e) { console.warn(`data site ${sh.base} unavailable:`, e.message); }
     }
-    index.generated = st.generated; indexAt = Date.now();
+    if (!index || changed) index = merge();
+    index.generated = sites.get('').generated; indexAt = Date.now();
   } catch (e) { if (!index) throw new Error('the shared data set could not be loaded (' + e.message + ')'); }
   return index;
 }
 // what a symbol has on the shared page, in words: 'daily and hourly history', 'daily history'
 export const kept = (tfs) => `${tfs.filter((t) => t === '1d' || t === '1h').map((t) => (t === '1d' ? 'daily' : 'hourly')).join(' and ')} history`;
+// The published file format (tools/snapshot.py: encode_series): bar times as gaps in bar steps,
+// the adjusted close as runs of a factor. Plain files pass through unchanged.
+export function decodeSeries(d) {
+  if (!d || !d.enc) return d;
+  const out = {};
+  for (const k of Object.keys(d)) if (!['enc', 't0', 'step', 'dt', 'af'].includes(k)) out[k] = d[k];
+  if (d.t0 != null) { const t = [d.t0]; for (const g of d.dt) t.push(t[t.length - 1] + g * d.step); out.t = t; }
+  if (d.af) {
+    const a = [], c = d.c;
+    d.af.forEach(([start, f], k) => { const end = k + 1 < d.af.length ? d.af[k + 1][0] : c.length; for (let i = start; i < end; i++) a.push(round(c[i] * f)); });
+    out.a = a;
+  }
+  return out;
+}
 async function loadFile(tf, symbol) {
   const ix = await loadIndex(), key = tf + '|' + symbol, hit = files.get(key), e = ix.by.get(symbol);
   if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} has ${kept(e.tfs)} on the shared page; shorter timeframes are kept for the core symbols` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
@@ -257,7 +292,7 @@ async function loadFile(tf, symbol) {
   // core files change with every build; the rest change a few times an hour at most, so they are
   // left to the browser's own cache (the site serves them as fresh for ten minutes)
   const g = ix.generated; // the build this request belongs to: the index object is updated in place
-  const p = fetch(`data/${tf}/${ix.file[symbol]}.json${e.tier === 2 ? '' : `?g=${g}`}`).then((r) => { if (!r.ok) throw new Error(`${symbol}: no ${tf} data in the shared set`); return r.json(); });
+  const p = fetch(`${e.base || ''}data/${tf}/${ix.file[symbol]}.json${e.tier === 1 || !e.tier ? `?g=${g}` : ''}`).then((r) => { if (!r.ok) throw new Error(`${symbol}: no ${tf} data in the shared set`); return r.json(); }).then(decodeSeries);
   files.set(key, { g, p }); // callers that arrive while it loads share the one request
   const mine = () => { const cur = files.get(key); return cur && cur.p === p; }; // not replaced by a newer build's request
   try { const data = await p; if (mine()) files.set(key, { g, data }); return data; }
@@ -328,14 +363,19 @@ export function tfs(symbol) {
 // `broad`: also the broad tier's file (pages published before it was split have it all in one)
 const packAt = {};
 export async function pack(broad = false) {
-  const ix = await loadIndex();
-  const g = ix.generated;
-  const get = async (name) => { const hit = packAt[name]; if (hit && hit.g === g) return hit.data; const data = await getJson(`data/${name}?g=${g}`); packAt[name] = { g, data }; return data; };
-  const main = await get('pack.json');
+  await loadIndex();
+  const get = async (base, name) => {
+    const g = (sites.get(base) || {}).generated, key = base + name, hit = packAt[key];
+    if (hit && hit.g === g) return hit.data;
+    const data = await getJson(`${base}data/${name}?g=${g}`); packAt[key] = { g, data }; return data;
+  };
+  const main = await get('', 'pack.json');
   if (!broad) return main;
-  let more = { s: {} };
-  try { more = await get('pack-broad.json'); } catch { /* an older build: everything is in pack.json */ }
-  return { generated: main.generated, s: { ...main.s, ...more.s } };
+  const s = { ...main.s };
+  for (const base of sites.keys()) {
+    try { Object.assign(s, (await get(base, 'pack-broad.json')).s); } catch { /* none there (an older build kept everything in pack.json) */ }
+  }
+  return { generated: main.generated, s };
 }
 
 export async function batch(symbols, tf, limit = 0, live = false) {

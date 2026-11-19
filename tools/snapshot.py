@@ -28,6 +28,13 @@ Two tiers, so the data set can be wide without hammering the provider:
     python3 tools/snapshot.py _site                          # full build
     python3 tools/snapshot.py _site NQ=F SPY --ext=KO,PEP --broad=AAL,ACM   # just these (for testing)
     python3 tools/snapshot.py _site --prev=prev --site=https://example.github.io/meridian/
+
+The data set can be split across sites, each with its own size limit (GitHub Pages: 1 GB):
+
+    --part=main  --shard=URL   everything but the broad tier; the page also reads the site at URL
+    --part=broad               the broad tier only, as a data site of its own (no app)
+
+The default, --part=all, builds one site with everything.
 """
 from __future__ import annotations
 
@@ -88,7 +95,8 @@ EXT_RANGE = {"1d": "10y", "1h": "1y"}
 # how old an extended series may get while the stock market is open, in seconds
 EXT_TARGET = {"1d": 30 * 60, "1h": 60 * 60}
 EXT_BUDGET = 320       # extended refreshes per build, beyond series the site does not have at all
-BROAD_KEEP = {"1d": 2520}
+BROAD_KEEP = {"1d": 1260}  # five years: the broad tier is the least traded, and the biggest
+BROAD_RANGE = {"1d": "5y"}
 BROAD_TARGET = {"1d": 60 * 60}
 BROAD_BUDGET = 700     # broad refreshes per build (each is a small request: a month of bars)
 CRYPTO_BUDGET = 120    # coin refreshes per build
@@ -194,6 +202,63 @@ def join_daily(old: dict, new: dict) -> dict | None:
     return out
 
 
+# ───────────────────────── the published file format (pure) ─────────────────────────
+AF_TOL = 2e-5  # largest relative error allowed in a decoded adjusted close
+STEP = {"1m": 60, "x1m": 60, "5m": 300, "1h": 3600, "1d": 86400}
+
+
+def encode_series(d: dict) -> dict:
+    """A series as published: about a third smaller than plain columns, decoded by the page
+    (web/js/static.js: decodeSeries) and by decode_series here, exactly.
+      t   -> t0 + dt, the gaps in bar steps (a day, an hour, ...), when every gap is whole
+      a   -> af, runs of [first bar, factor] with a = round(c * factor). The factor only changes
+             at a dividend, but the provider rounds the column its own way, so a run is kept
+             while it reproduces every adjusted close within AF_TOL (a fraction of a cent);
+             otherwise the column is published as it is.
+    Decoding gives back t exactly, and a within AF_TOL; decoding and encoding again changes nothing."""
+    if not d or not d.get("t"):
+        return d
+    out = {k: v for k, v in d.items() if k not in COLS}
+    t, step = d["t"], STEP.get(d.get("tf"))
+    if step and all((t[i] - t[i - 1]) % step == 0 and t[i] > t[i - 1] for i in range(1, len(t))):
+        out["t0"], out["step"], out["dt"] = t[0], step, [(t[i] - t[i - 1]) // step for i in range(1, len(t))]
+    else:
+        out["t"] = t
+    for col in "ohlcv":
+        out[col] = d[col]
+    if d.get("a"):
+        a, c, runs = d["a"], d["c"], []
+        f = None
+        for i in range(len(c)):
+            if f is None or abs(c[i] * f - a[i]) > AF_TOL * abs(a[i]):
+                f = a[i] / c[i]
+                runs.append([i, f])
+        if runs is not None and len(runs) <= max(8, len(c) // 20):
+            out["af"] = runs
+        else:
+            out["a"] = a
+    out["enc"] = 1
+    return out
+
+
+def decode_series(d: dict | None) -> dict | None:
+    if not d or not d.get("enc"):
+        return d
+    out = {k: v for k, v in d.items() if k not in ("enc", "t0", "step", "dt", "af")}
+    if "t0" in d:
+        t = [d["t0"]]
+        for g in d["dt"]:
+            t.append(t[-1] + g * d["step"])
+        out["t"] = t
+    if "af" in d:
+        c, runs, a = d["c"], d["af"], []
+        for k, (start, f) in enumerate(runs):
+            end = runs[k + 1][0] if k + 1 < len(runs) else len(c)
+            a.extend(server._round(c[i] * f) for i in range(start, end))
+        out["a"] = a
+    return out
+
+
 # ───────────────────────── market summary (pure) ─────────────────────────
 def pack_row(d: dict, fx: dict | None = None) -> dict:
     """The last year of a daily series, small enough to ship for every symbol at once: dates as day
@@ -290,7 +355,7 @@ class Build:
         raise Unreachable(f"{rel}: {err}")
 
     def previous_series(self, tf: str, symbol: str) -> dict | None:
-        d = self.previous(f"{tf}/{safe(symbol)}.json")
+        d = decode_series(self.previous(f"{tf}/{safe(symbol)}.json"))
         if d and d.get("symbol") == symbol and d.get("t") and len(d["t"]) == len(d.get("c") or []) and d.get("meta"):
             return d
         return None
@@ -302,7 +367,7 @@ class Build:
                 d[col] = d[col][-keep:]
         d.pop("stale", None)
         with open(self.path(tf, symbol), "w") as f:
-            json.dump(d, f, separators=(",", ":"))
+            json.dump(encode_series(d), f, separators=(",", ":"))
         meta = d["meta"]
         with self.lock:
             e = self.info.setdefault(symbol, {"symbol": symbol, "name": meta.get("name") or symbol, "type": meta.get("type") or "", "exch": meta.get("exchange") or "", "tier": tier, "tfs": []})
@@ -339,7 +404,7 @@ class Build:
                     ext = self.previous_series("x1m", symbol)  # its extended-hours prints go with it
                     if ext:
                         with open(self.path("x1m", symbol), "w") as f:
-                            json.dump(ext, f, separators=(",", ":"))
+                            json.dump(encode_series(ext), f, separators=(",", ":"))
                         with self.lock:
                             self.info.setdefault(symbol, {"symbol": symbol, "name": old["meta"].get("name") or symbol, "type": old["meta"].get("type") or "", "exch": old["meta"].get("exchange") or "", "tier": 1, "tfs": []})["tfs"].append("x1m")
             except Unreachable:
@@ -356,7 +421,7 @@ class Build:
         rows = [i for i, t in enumerate(d["t"]) if t > after]
         slim = {"symbol": symbol, "tf": "x1m", **{col: [d[col][i] for i in rows] for col in "tohlcv"}, "meta": d["meta"], "fetched": d.get("fetched", 0)}
         with open(self.path("x1m", symbol), "w") as f:
-            json.dump(slim, f, separators=(",", ":"))
+            json.dump(encode_series(slim), f, separators=(",", ":"))
         with self.lock:
             self.info.setdefault(symbol, {"symbol": symbol, "name": d["meta"].get("name") or symbol, "type": d["meta"].get("type") or "", "exch": d["meta"].get("exchange") or "", "tier": 1, "tfs": []})["tfs"].append("x1m")
 
@@ -382,7 +447,7 @@ class Build:
                         with self.lock:
                             self.joined += 1
                         return symbol, tf, "fresh"
-            d = self.yahoo(symbol, tf, EXT_RANGE[tf], tries=2)
+            d = self.yahoo(symbol, tf, (BROAD_RANGE if tier == 3 else EXT_RANGE)[tf], tries=2)
             d["full"] = d.get("fetched", 0)
             self.write(d, tier, keep[tf], True)
             return symbol, tf, "fresh"
@@ -438,8 +503,16 @@ def main():
     out = os.path.abspath(args[0] if args else "_site")
     testing = len(args) > 1 or "ext" in opts or "broad" in opts
     pick = lambda k, full: [s.upper() for s in opts[k].split(",") if s] if k in opts else ([] if testing else full)
+    part = opts.get("part") or "all"
+    if part not in ("all", "main", "broad"):
+        sys.exit(f"unknown --part={part}")
     core = [s.upper() for s in args[1:]] or ([] if testing else CORE)
     extended, broad, crypto = pick("ext", EXTENDED), pick("broad", BROAD), pick("crypto", CRYPTO)
+    if part == "broad":
+        core, extended, crypto = [], [], []
+    elif part == "main":
+        broad = []
+    shards = [u if u.endswith("/") else u + "/" for u in (opts.get("shard") or "").split(",") if u] if part == "main" else []
     TIER.update({s: (2, EXT_KEEP) for s in extended + crypto})
     TIER.update({s: (3, BROAD_KEEP) for s in broad})
     site = opts.get("site") or os.environ.get("MERIDIAN_SITE") or None
@@ -452,16 +525,23 @@ def main():
 
     if os.path.isdir(out):
         shutil.rmtree(out)
-    shutil.copytree(os.path.join(ROOT, "web"), out)
+    if part == "broad":
+        # a data site: no app, just the files and a pointer to where they are read
+        os.makedirs(out)
+        with open(os.path.join(out, "index.html"), "w") as f:
+            f.write('<!doctype html><meta charset="utf-8"><title>Meridian data</title><p>Price history for '
+                    '<a href="https://21e8-miner.github.io/meridian/">Meridian</a>. Nothing to see here.</p>\n')
+    else:
+        shutil.copytree(os.path.join(ROOT, "web"), out)
+        # tell the page it has no server behind it, so it does not go looking for one
+        page = os.path.join(out, "index.html")
+        with open(page) as f:
+            html = f.read()
+        with open(page, "w") as f:
+            f.write(html.replace("<html lang=\"en\">", "<html lang=\"en\" data-backend=\"static\">", 1))
+        stamp_assets(out)
     for tf in list(KEEP) + ["x1m"]:
         os.makedirs(os.path.join(out, "data", tf), exist_ok=True)
-    # tell the page it has no server behind it, so it does not go looking for one
-    page = os.path.join(out, "index.html")
-    with open(page) as f:
-        html = f.read()
-    with open(page, "w") as f:
-        f.write(html.replace("<html lang=\"en\">", "<html lang=\"en\" data-backend=\"static\">", 1))
-    stamp_assets(out)
 
     # core: everything, every build
     jobs = [(s, tf) for s in core for tf in KEEP]
@@ -470,8 +550,13 @@ def main():
     core_bad = [r for r in core_res if r[2] != "fresh"]
     for cur, (pair, direct) in FX_PAIRS.items():
         try:
-            with open(b.path("1d", pair)) as f:
-                last = json.load(f)["c"][-1]
+            if os.path.exists(b.path("1d", pair)):
+                with open(b.path("1d", pair)) as f:
+                    last = json.load(f)["c"][-1]
+            elif part == "broad":  # no core here: read the rate itself, without publishing it
+                last = b.yahoo(pair, "1d", "5d")["c"][-1]
+            else:
+                continue
             b.fx[cur] = last if direct else 1.0 / last
         except Exception:
             pass  # that currency's dollar figures stay blank
@@ -497,10 +582,16 @@ def main():
     # The market is in session only if the clock says so AND today has traded. On a holiday the
     # last session is the one SPY last traded in, not today's 16:00.
     trading, closed = stock_session(now), last_close(now)
-    spy = os.path.join(out, "data", "1m", "SPY.json")
+    spy, day = os.path.join(out, "data", "1m", "SPY.json"), None
     if os.path.exists(spy):
         with open(spy) as f:
-            day = json.load(f)["t"][-1] // 86400  # wall-clock day of the newest regular bar
+            day = decode_series(json.load(f))["t"][-1] // 86400  # wall-clock day of the newest regular bar
+    elif part == "broad" and keys:
+        try:
+            day = b.yahoo("SPY", "1m")["t"][-1] // 86400
+        except Exception:
+            pass  # go by the clock alone
+    if day is not None:
         if day != int(server._wall_fn("America/New_York")(now)) // 86400:
             trading = False
             d = time.gmtime(day * 86400)
@@ -547,6 +638,8 @@ def main():
         "indexes": {k: {"country": v["country"], "members": [x for x in v["members"] if x in b.info]} for k, v in (UNIVERSE.get("intl") or {}).items() if any(x in b.info for x in v["members"])},
         "live": server.LIVE_PROXY,
         "stocks": server.STOCK_PROXY,
+        # other sites holding part of the data set: the page reads their catalogs too
+        "shards": [{"base": u} for u in shards],
         "file": {e["symbol"]: safe(e["symbol"]) for e in symbols},
     }
     blob = json.dumps(catalog, separators=(",", ":"), sort_keys=True)
@@ -560,7 +653,10 @@ def main():
         json.dump(b.state, f, separators=(",", ":"))
     # the market summary in two files, so a view of the core and extended lists (the S&P 500, the
     # funds) does not have to download a year of closes for every broad symbol too
+    packs = {"all": ("pack.json", "pack-broad.json"), "main": ("pack.json",), "broad": ("pack-broad.json",)}[part]
     for name, keep in (("pack.json", lambda e: e.get("tier") != 3), ("pack-broad.json", lambda e: e.get("tier") == 3)):
+        if name not in packs:
+            continue
         with open(os.path.join(data, name), "w") as f:
             json.dump({"generated": generated, "s": {e["symbol"]: b.pack[e["symbol"]] for e in symbols if e["symbol"] in b.pack and keep(e)}}, f, separators=(",", ":"))
     open(os.path.join(out, ".nojekyll"), "w").close()
