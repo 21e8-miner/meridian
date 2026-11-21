@@ -241,7 +241,7 @@ fam_all = {s for v in snap.UNIVERSE["families"].values() for s in v}
 check("Vanguard and the other big issuers have lists; their busiest funds get five-minute bars, the rest daily and hourly",
       {"Vanguard", "iShares", "SPDR", "Schwab", "Invesco"} <= set(snap.UNIVERSE["families"]) and {"VGT", "VYM", "VHT", "VT"} <= set(snap.EXTENDED) | set(snap.CORE)
       and len(snap.UNIVERSE["families"]["Vanguard"]) >= 90 and len(fam_all & (set(snap.CORE) | set(snap.EXTENDED) | set(snap.BROAD))) >= 0.85 * len(fam_all))
-check("broad tier: daily and hourly, disjoint from the others, refreshed less often", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d", "1h", "5m"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.5)
+check("broad tier: daily and hourly, disjoint from the others, refreshed less often", not set(snap.BROAD) & (set(snap.CORE) | set(snap.EXTENDED)) and len(snap.BROAD) > 1000 and list(snap.BROAD_KEEP) == ["1d", "1h", "5m", "1m"] and snap.due_score(mon10 - 2700, "1d", mon10, True, None, snap.BROAD_TARGET) == 0.5)
 check("the two tiers do not overlap, and every proxied symbol is core", not set(snap.CORE) & set(snap.EXTENDED) and set(server.LIVE_PROXY) | set(server.STOCK_PROXY) <= set(snap.CORE) and len(snap.EXTENDED) > 350)
 # cache housekeeping
 import tempfile
@@ -340,11 +340,11 @@ check("format: times off any grid still round-trip (one-second steps)", snap.enc
 back = {**ser, "t": [0, 3600, 3600, 7200, 10800]}
 check("format: times that do not rise are published as they are", snap.encode_series(back)["t"] == back["t"])
 check("format: a plain file passes through decoding unchanged", snap.decode_series(ser) is ser and snap.decode_series(None) is None)
-check("broad tier keeps ten years of daily bars, eight months of hourly and two weeks of five-minute", snap.BROAD_KEEP == {"1d": 2520, "1h": 1200, "5m": 780} and snap.BROAD_RANGE == {"1d": "10y", "1h": "1y", "5m": "1mo"} and "5m" in snap.BROAD_TARGET)
+check("broad tier keeps ten years of daily bars, eight months of hourly, two weeks of five-minute and four sessions of one-minute", snap.BROAD_KEEP == {"1d": 2520, "1h": 1200, "5m": 780, "1m": 1500} and snap.BROAD_RANGE == {"1d": "10y", "1h": "1y", "5m": "1mo", "1m": "5d"} and snap.BROAD_TARGET["5m"] == snap.BROAD_TARGET["1m"] == 3600)
 check("extended tier and coins have five-minute bars too (15m and 30m are built from them)", snap.EXT_KEEP["5m"] > 1000 and snap.EXT_RANGE["5m"] == "1mo" and "5m" in snap.EXT_TARGET and "5m" in snap.JOIN_RANGE)
-check("extended tier and coins have one-minute bars: four sessions, fetched within the provider's window, joined from today's", snap.EXT_KEEP["1m"] == snap.KEEP["1m"] and snap.EXT_RANGE["1m"] == "5d" and snap.JOIN_RANGE["1m"] == "1d" and snap.EXT_TARGET["1m"] == 1800 and "1m" not in snap.BROAD_KEEP)
-check("a split data set publishes the broad tier's daily and 5-minute history on the data site and its hourly on the main one",
-      snap.BROAD_PART["broad"] == ("1d", "5m") and snap.BROAD_PART["main"] == ("1h",) and set(snap.BROAD_PART["all"]) == set(snap.BROAD_KEEP))
+check("extended tier and coins have one-minute bars: four sessions, fetched within the provider's window, joined from today's", snap.EXT_KEEP["1m"] == snap.KEEP["1m"] and snap.EXT_RANGE["1m"] == "5d" and snap.JOIN_RANGE["1m"] == "1d" and snap.EXT_TARGET["1m"] == 1800 and snap.BROAD_KEEP["1m"] == snap.EXT_KEEP["1m"])
+check("a split data set publishes the broad tier's daily, 5- and 1-minute history on the data site and its hourly on the main one",
+      snap.BROAD_PART["broad"] == ("1d", "5m", "1m") and snap.BROAD_PART["main"] == ("1h",) and set(snap.BROAD_PART["all"]) == set(snap.BROAD_KEEP))
 check("history range: files from before it was recorded count as five years (broad daily) or the current window",
       snap.history_range({"tf": "1d"}, 3) == "5y" and snap.history_range({"tf": "1h"}, 3) == "1y" and snap.history_range({"tf": "1d"}, 2) == "10y" and snap.history_range({"tf": "1d", "rng": "10y"}, 3) == "10y")
 # joining works for intraday bars too, and remembers how far back the history went

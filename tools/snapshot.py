@@ -19,8 +19,8 @@ Two tiers, so the data set can be wide without hammering the provider:
             published site itself (--site). So each series is refreshed about twice an hour while
             the market is open, once after the close, and not at all overnight, at the weekend or
             on a holiday, when it cannot change.
-  broad     daily (ten years), hourly and five-minute (two weeks) history, for the other US stocks
-            over $2B, smaller ones,
+  broad     daily (ten years), hourly, five-minute (two weeks) and one-minute (four sessions)
+            history, for the other US stocks over $2B, smaller ones,
             other ETFs that trade enough and the members of world indexes (web/universe.json
             "broad" and "intl"; see tools/make_universe.py). Refreshed the same way, less often.
 
@@ -34,11 +34,11 @@ far back as is now kept; then the whole series is fetched.
 
 The data set can be split across sites, each with its own size limit (GitHub Pages: 1 GB):
 
-    --part=main  --shard=URL   everything but the broad tier's daily and 5-minute history; the page
-                               also reads the site(s) at URL, and takes each timeframe from
+    --part=main  --shard=URL   everything but the broad tier's daily, 5- and 1-minute history; the
+                               page also reads the site(s) at URL, and takes each timeframe from
                                whichever has it
-    --part=broad               the broad tier's daily and 5-minute history only, as a data site of
-                               its own (no app)
+    --part=broad               the broad tier's daily, 5- and 1-minute history only, as a data site
+                               of its own (no app)
 
 The default, --part=all, builds one site with everything.
 """
@@ -103,12 +103,12 @@ EXT_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo", "1m": "5d"}
 # how old an extended series may get while the stock market is open, in seconds
 EXT_TARGET = {"1d": 60 * 60, "1h": 60 * 60, "5m": 30 * 60, "1m": 30 * 60}
 EXT_BUDGET = 1200       # extended refreshes per build, beyond series the site does not have at all
-BROAD_KEEP = {"1d": 2520, "1h": 1200, "5m": 780}  # ten years of days, eight months of hours, two weeks of 5m
-BROAD_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo"}
-BROAD_TARGET = {"1d": 90 * 60, "1h": 120 * 60, "5m": 60 * 60}  # the least traded and the biggest tier: refreshed less often
+BROAD_KEEP = {"1d": 2520, "1h": 1200, "5m": 780, "1m": 1500}  # ten years of days, eight months of hours, two weeks of 5m, four sessions of 1m
+BROAD_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo", "1m": "5d"}
+BROAD_TARGET = {"1d": 90 * 60, "1h": 120 * 60, "5m": 60 * 60, "1m": 60 * 60}  # the least traded and the biggest tier: refreshed less often
 BROAD_BUDGET = 1000    # broad refreshes per build and timeframe (each is a small request: the last few bars)
 # Which of the broad tier's timeframes each part of a split data set publishes (see --part)
-BROAD_PART = {"all": ("1d", "1h", "5m"), "main": ("1h",), "broad": ("1d", "5m")}
+BROAD_PART = {"all": ("1d", "1h", "5m", "1m"), "main": ("1h",), "broad": ("1d", "5m", "1m")}
 # how much a refresh asks for, to join onto the carried history
 JOIN_RANGE = {"1d": "1mo", "1h": "5d", "5m": "5d", "1m": "1d"}
 CRYPTO_BUDGET = 200    # coin refreshes per build

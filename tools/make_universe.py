@@ -13,7 +13,8 @@ history on the shared page.
 
 screener.json is Nasdaq's public list of US-listed stocks
 (https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&download=true). Common
-stocks over BROAD_MIN_CAP that are not already listed become "broad": daily and hourly history. Their
+stocks over BROAD_MIN_CAP that are not already listed become "broad": daily, hourly, five-minute and
+one-minute history. Their
 sectors are Nasdaq's own classification mapped onto the eleven GICS names, so they are rougher than
 the index members'. Without the file the previous broad list is kept.
 
