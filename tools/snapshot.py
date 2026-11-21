@@ -4,7 +4,7 @@ Build the shareable static site: a copy of web/ plus a snapshot of exchange hist
 
 A static page has no server to fetch prices for it, and the price feed cannot be read from a
 browser. So a scheduled job runs this script: it writes each symbol's recent bars to
-<out>/data/<tf>/<symbol>.json, and the page brings them up to the second on its own by projecting
+<out>/data/<tf>/<symbol>.json.gz, and the page brings them up to the second on its own by projecting
 from Hyperliquid, which a browser can read (see web/js/static.js).
 
 Two tiers, so the data set can be wide without hammering the provider:
@@ -44,6 +44,7 @@ The default, --part=all, builds one site with everything.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import math
 import re
@@ -312,6 +313,27 @@ def decode_series(d: dict | None) -> dict | None:
     return out
 
 
+SERIES_EXT = ".json.gz"  # series files are published gzip-compressed: about a third of the size
+GZIP_LEVEL = 6
+GZ_MAGIC = b"\x1f\x8b"
+
+
+def series_bytes(d: dict) -> bytes:
+    """A series as a published file: the compact JSON (encode_series), gzip-compressed with a fixed
+    time stamp, so the same series always gives the same bytes. GitHub Pages counts a site's size
+    as stored, and these files would otherwise be most of it; the page inflates them itself
+    (web/js/static.js: readJsonBytes)."""
+    return gzip.compress(json.dumps(encode_series(d), separators=(",", ":")).encode("utf-8"), compresslevel=GZIP_LEVEL, mtime=0)
+
+
+def read_json_bytes(raw: bytes):
+    """A published JSON file's bytes, compressed or not (and compressed again on the way, if a
+    server did that)."""
+    while raw[:2] == GZ_MAGIC:
+        raw = gzip.decompress(raw)
+    return json.loads(raw.decode("utf-8"))
+
+
 # ───────────────────────── market summary (pure) ─────────────────────────
 def pack_row(d: dict, fx: dict | None = None) -> dict:
     """The last year of a daily series, small enough to ship for every symbol at once: dates as day
@@ -362,7 +384,7 @@ class Build:
         self.joined = 0                   # refreshes done by joining the last few bars onto the carried history
 
     def path(self, tf: str, symbol: str) -> str:
-        return os.path.join(self.out, "data", tf, safe(symbol) + ".json")
+        return os.path.join(self.out, "data", tf, safe(symbol) + SERIES_EXT)
 
     def yahoo(self, symbol: str, tf: str, rng: str | None = None, tries: int = 4) -> dict:
         for k in range(tries):
@@ -378,17 +400,17 @@ class Build:
                     continue
                 raise
 
-    def previous(self, rel: str):
-        """A JSON file of the previous build (path under data/): from the local copy of that build
-        when there is one, else from the published site. None if that build has no such file;
+    def previous_bytes(self, rel: str) -> bytes | None:
+        """A file of the previous build (path under data/), as stored: from the local copy of that
+        build when there is one, else from the published site. None if that build has no such file;
         raises Unreachable if it could not be read, which must never be mistaken for "not there"."""
         if self.prev:
             path = os.path.join(self.prev, "data", rel)
             if not os.path.exists(path):
                 return None
             try:
-                with open(path) as f:
-                    return json.load(f)
+                with open(path, "rb") as f:
+                    return f.read()
             except Exception as e:
                 raise Unreachable(f"{rel}: {e}")
         if not self.site:
@@ -399,7 +421,7 @@ class Build:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": server.UA})
                 with urllib.request.urlopen(req, timeout=20) as r:
-                    return json.loads(r.read().decode("utf-8"))
+                    return r.read()
             except Exception as e:
                 if getattr(e, "code", None) == 404:
                     return None
@@ -407,20 +429,54 @@ class Build:
                 time.sleep(1 + 2 * k)
         raise Unreachable(f"{rel}: {err}")
 
-    def previous_series(self, tf: str, symbol: str) -> dict | None:
-        d = decode_series(self.previous(f"{tf}/{safe(symbol)}.json"))
-        if d and d.get("symbol") == symbol and d.get("t") and len(d["t"]) == len(d.get("c") or []) and d.get("meta"):
-            return d
+    def previous(self, rel: str):
+        """A JSON file of the previous build, parsed (see previous_bytes)."""
+        raw = self.previous_bytes(rel)
+        if raw is None:
+            return None
+        try:
+            return read_json_bytes(raw)
+        except Exception as e:
+            raise Unreachable(f"{rel}: {e}")
+
+    def previous_file(self, tf: str, symbol: str):
+        """One series of the previous build: (its file's bytes when they are this format's, gzip
+        once, else None; the series) or None. Builds before the files were compressed published
+        <symbol>.json: read those too."""
+        for ext in (SERIES_EXT, ".json"):
+            raw = self.previous_bytes(f"{tf}/{safe(symbol)}{ext}")
+            if raw is None:
+                continue
+            try:
+                inner = gzip.decompress(raw) if raw[:2] == GZ_MAGIC else raw
+                d = decode_series(read_json_bytes(inner))
+            except Exception as e:
+                raise Unreachable(f"{tf}/{safe(symbol)}{ext}: {e}")
+            if d and d.get("symbol") == symbol and d.get("t") and len(d["t"]) == len(d.get("c") or []) and d.get("meta"):
+                return (raw if ext == SERIES_EXT and raw[:2] == GZ_MAGIC and inner[:1] == b"{" else None), d
+            return None
         return None
 
-    def write(self, d: dict, tier: int, keep: int, fresh: bool):
+    def previous_series(self, tf: str, symbol: str) -> dict | None:
+        got = self.previous_file(tf, symbol)
+        return got[1] if got else None
+
+    def put(self, tf: str, symbol: str, d: dict | None, raw: bytes | None = None):
+        """Publish one series file: `raw`, the previous build's own bytes for an unchanged series
+        (no need to compress it again), or else `d` compressed."""
+        data = raw if raw is not None else series_bytes(d)
+        with open(self.path(tf, symbol), "wb") as f:
+            f.write(data)
+
+    def write(self, d: dict, tier: int, keep: int, fresh: bool, raw: bytes | None = None):
         symbol, tf = d["symbol"], d["tf"]
+        if raw is not None and len(d["t"]) > keep:
+            raw = None  # it is cut shorter here, so it is not the same file
         for col in COLS:
             if col in d:
                 d[col] = d[col][-keep:]
         d.pop("stale", None)
-        with open(self.path(tf, symbol), "w") as f:
-            json.dump(encode_series(d), f, separators=(",", ":"))
+        self.put(tf, symbol, d, raw)
         meta = d["meta"]
         with self.lock:
             e = self.info.setdefault(symbol, {"symbol": symbol, "name": meta.get("name") or symbol, "type": meta.get("type") or "", "exch": meta.get("exchange") or "", "tier": tier, "tfs": []})
@@ -468,8 +524,7 @@ class Build:
                 if old and tf == "1m" and old["meta"].get("type") in server.STOCK_TYPES:
                     ext = self.previous_series("x1m", symbol)  # its extended-hours prints go with it
                     if ext:
-                        with open(self.path("x1m", symbol), "w") as f:
-                            json.dump(encode_series(ext), f, separators=(",", ":"))
+                        self.put("x1m", symbol, ext)
                         with self.lock:
                             self.info.setdefault(symbol, {"symbol": symbol, "name": old["meta"].get("name") or symbol, "type": old["meta"].get("type") or "", "exch": old["meta"].get("exchange") or "", "tier": 1, "tfs": []})["tfs"].append("x1m")
             except Unreachable:
@@ -485,8 +540,7 @@ class Build:
         d = self.yahoo(symbol, "x1m")
         rows = [i for i, t in enumerate(d["t"]) if t > after]
         slim = {"symbol": symbol, "tf": "x1m", **{col: [d[col][i] for i in rows] for col in "tohlcv"}, "meta": d["meta"], "fetched": d.get("fetched", 0)}
-        with open(self.path("x1m", symbol), "w") as f:
-            json.dump(encode_series(slim), f, separators=(",", ":"))
+        self.put("x1m", symbol, slim)
         with self.lock:
             self.info.setdefault(symbol, {"symbol": symbol, "name": d["meta"].get("name") or symbol, "type": d["meta"].get("type") or "", "exch": d["meta"].get("exchange") or "", "tier": 1, "tfs": []})["tfs"].append("x1m")
 
@@ -530,13 +584,13 @@ class Build:
     def carry(self, job):
         symbol, tf = job
         try:
-            d = self.previous_series(tf, symbol)
+            got = self.previous_file(tf, symbol)
         except Unreachable as e:
             return symbol, tf, f"unreachable: {e}"
-        if not d:
+        if not got:
             return symbol, tf, "not in the previous build"
         tier, keep = TIER.get(symbol, (2, EXT_KEEP))
-        self.write(d, tier, keep[tf], False)
+        self.write(got[1], tier, keep[tf], False, raw=got[0])  # unchanged: the same bytes again
         return symbol, tf, "carried"
 
 
@@ -619,8 +673,8 @@ def main():
     for cur, (pair, direct) in FX_PAIRS.items():
         try:
             if os.path.exists(b.path("1d", pair)):
-                with open(b.path("1d", pair)) as f:
-                    last = json.load(f)["c"][-1]
+                with open(b.path("1d", pair), "rb") as f:
+                    last = read_json_bytes(f.read())["c"][-1]
             elif part == "broad":  # no core here: read the rate itself, without publishing it
                 last = b.yahoo(pair, "1d", "5d")["c"][-1]
             else:
@@ -650,10 +704,10 @@ def main():
     # The market is in session only if the clock says so AND today has traded. On a holiday the
     # last session is the one SPY last traded in, not today's 16:00.
     trading, closed = stock_session(now), last_close(now)
-    spy, day = os.path.join(out, "data", "1m", "SPY.json"), None
+    spy, day = b.path("1m", "SPY"), None
     if os.path.exists(spy):
-        with open(spy) as f:
-            day = decode_series(json.load(f))["t"][-1] // 86400  # wall-clock day of the newest regular bar
+        with open(spy, "rb") as f:
+            day = decode_series(read_json_bytes(f.read()))["t"][-1] // 86400  # wall-clock day of the newest regular bar
     elif part == "broad" and keys:
         try:
             day = b.yahoo("SPY", "1m")["t"][-1] // 86400
@@ -712,6 +766,8 @@ def main():
         # other sites holding part of the data set: the page reads their catalogs too
         "shards": [{"base": u} for u in shards],
         "file": {e["symbol"]: safe(e["symbol"]) for e in symbols},
+        # series files are data/<tf>/<file>.json.gz, gzip-compressed (sites built before had .json)
+        "gz": 1,
     }
     blob = json.dumps(catalog, separators=(",", ":"), sort_keys=True)
     generated = int(time.time())

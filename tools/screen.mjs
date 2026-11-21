@@ -20,6 +20,7 @@ The same functions run in the page, so the instant answers are the ones a scan o
 files would give. A symbol that cannot be read is left out and counted; nothing here stops a build.
 */
 import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeSeries } from '../web/js/static.js';
@@ -33,6 +34,17 @@ export function parseArgs(argv) {
   return { out: args[0] || '_site', part: opts.part || 'all', prev: opts.prev || null, site: opts.site || null, shard: (opts.shard || '').split(',').filter(Boolean)[0] || null, now: opts.now ? Number(opts.now) : Date.now() / 1000 };
 }
 const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
+// A series file: <name>.json.gz (gzip) on sites built since files are compressed, else <name>.json.
+export function readSeries(dir, name) {
+  for (const ext of ['.json.gz', '.json']) {
+    const p = join(dir, name + ext);
+    if (!existsSync(p)) continue;
+    let b = readFileSync(p);
+    while (b.length > 1 && b[0] === 0x1f && b[1] === 0x8b) b = gunzipSync(b);
+    return JSON.parse(b.toString('utf8'));
+  }
+  throw new Error(`no file for ${name}`);
+}
 const tryJson = (p) => { try { return existsSync(p) ? readJson(p) : null; } catch { return null; } };
 async function fetchJson(url) {
   const r = await fetch(url, { headers: { 'User-Agent': 'meridian-build' } });
@@ -51,7 +63,7 @@ export function screenSite(out, now) {
   for (const e of cat.symbols) {
     if (!e.tfs.includes('1d')) continue;
     try {
-      const d = decodeSeries(readJson(join(data, '1d', cat.file[e.symbol] + '.json')));
+      const d = decodeSeries(readSeries(join(data, '1d'), cat.file[e.symbol]));
       const daily = { symbol: e.symbol, tf: '1d', t: d.t, o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, meta: d.meta || {} };
       const r = screenSymbol(daily, { now, dv: dv[e.symbol] });
       if (!r) continue;

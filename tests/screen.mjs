@@ -7,7 +7,8 @@ import { PRESETS, presetOf, scanLimit, scanBars, matchAgo, screenRow, screenSymb
 import { evalRuleset, requiredTfs, cmp, num, ind } from '../web/js/conditions.js';
 import { aggregate, sliceBars } from '../web/js/data.js';
 import { calcIndicator } from '../web/js/ta.js';
-import { screenSite, nextEntries, parseArgs } from '../tools/screen.mjs';
+import { screenSite, nextEntries, parseArgs, readSeries } from '../tools/screen.mjs';
+import { gzipSync } from 'node:zlib';
 import { appendAll } from '../web/js/util.js';
 import { dailyBars, check, done } from './fixture.mjs';
 
@@ -109,7 +110,7 @@ try {
       if (opts.shift) d.t = d.t.map((t) => t + opts.shift * 86400);
       cat.symbols.push({ symbol: sym, tfs: opts.tfs || ['1d'], type: opts.type || 'EQUITY', ...(opts.mkt ? { mkt: opts.mkt, cur: 'JPY' } : {}) });
       cat.file[sym] = sym.replace(/[^A-Za-z0-9._-]/g, '_');
-      if (!opts.tfs || opts.tfs.includes('1d')) writeFileSync(join(out, 'data', '1d', cat.file[sym] + '.json'), JSON.stringify(d));
+      if (!opts.tfs || opts.tfs.includes('1d')) writeFileSync(join(out, 'data', '1d', cat.file[sym] + (opts.gz ? '.json.gz' : '.json')), opts.gz ? gzipSync(JSON.stringify(d)) : JSON.stringify(d));
       pack.s[sym] = { dv: opts.dv || 0 };
     }
     writeFileSync(join(out, 'data', 'catalog.json'), JSON.stringify(cat));
@@ -119,9 +120,10 @@ try {
   };
   const lastDay = Math.floor(dailyBars(1500, 1).t[1499] / 86400);
   const now = (lastDay + 1) * 86400 + 17 * 3600;
-  const main = site('main', { AAA: { seed: 1, dv: 5e6 }, BBB: { seed: 2, dv: 9e7, type: 'ETF' }, HOUR: { seed: 3, tfs: ['1h'] }, '7203.T': { seed: 4, mkt: 'Nikkei 225', tz: 'Asia/Tokyo', shift: 1 }, BAD: { seed: 5 } });
+  const main = site('main', { AAA: { seed: 1, dv: 5e6, gz: true }, BBB: { seed: 2, dv: 9e7, type: 'ETF' }, HOUR: { seed: 3, tfs: ['1h'] }, '7203.T': { seed: 4, mkt: 'Nikkei 225', tz: 'Asia/Tokyo', shift: 1 }, BAD: { seed: 5 } });
   writeFileSync(join(main, 'data', '1d', 'BAD.json'), '{not json');
   const r = screenSite(main, now);
+  check('build: compressed (.json.gz) and plain files are both read', readSeries(join(main, 'data', '1d'), 'AAA').c.length === 1500 && readSeries(join(main, 'data', '1d'), 'BBB').c.length === 1500);
   check('build: every symbol with daily history here is screened; one that cannot be read is counted, not fatal', r.n === 3 && r.failed === 1 && !r.screen.rows.HOUR && r.screen.rows.AAA.length === SCREEN_KEYS.length && r.screen.generated === 1234);
   check('build: dollar volume comes from the summary file, and presets are listed by name', r.screen.rows.BBB[SCREEN_KEYS.indexOf('dv')] === 9e7 && Object.keys(r.screen.presets).join() === Object.keys(PRESETS).join() && r.screen.cols.join() === SCREEN_KEYS.join());
   check('build: the feed\'s session is the newest finished US day (a later market abroad does not move it)', r.screen.final.date === isoDay(lastDay));

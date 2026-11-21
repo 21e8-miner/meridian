@@ -314,6 +314,26 @@ export function decodeSeries(d) {
   }
   return out;
 }
+// Series files are gzip-compressed on sites built since that change (<name>.json.gz, the
+// catalog says "gz"), plain JSON before. The bytes are read whatever the name says: a server may
+// also have compressed them again on the way, or not at all.
+const GZ = (b) => b.length > 1 && b[0] === 0x1f && b[1] === 0x8b;
+export async function readJsonBytes(bytes) {
+  let b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (GZ(b) && typeof DecompressionStream === 'undefined') throw new Error('this browser cannot read the shared data (it needs Chrome 80, Safari 16.4, Firefox 113 or newer)');
+  while (GZ(b)) b = new Uint8Array(await new Response(new Blob([b]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  return JSON.parse(new TextDecoder().decode(b));
+}
+// One series file by its path without extension; the other name is tried if this site's files
+// are not where its catalog says (a page holding a catalog from before the switch). null: none.
+export async function fetchSeries(path, gz, q = '', get = fetch) {
+  for (const ext of gz ? ['.json.gz', '.json'] : ['.json', '.json.gz']) {
+    const r = await get(path + ext + q);
+    if (r.ok) return readJsonBytes(await r.arrayBuffer());
+    if (r.status !== 404) throw new Error(`HTTP ${r.status}`);
+  }
+  return null;
+}
 async function loadFile(tf, symbol) {
   const ix = await loadIndex(), key = tf + '|' + symbol, hit = files.get(key), e = ix.by.get(symbol);
   if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} has ${kept(e.tfs)} on the shared page; shorter timeframes are kept for the most traded symbols` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
@@ -321,8 +341,8 @@ async function loadFile(tf, symbol) {
   // core files change with every build; the rest change a few times an hour at most, so they are
   // left to the browser's own cache (the site serves them as fresh for ten minutes)
   const g = ix.generated; // the build this request belongs to: the index object is updated in place
-  const base = (e.bases && e.bases[tf]) ?? e.base ?? '';
-  const p = fetch(`${base}data/${tf}/${ix.file[symbol]}.json${e.tier === 1 || !e.tier ? `?g=${g}` : ''}`).then((r) => { if (!r.ok) throw new Error(`${symbol}: no ${tf} data in the shared set`); return r.json(); }).then(decodeSeries);
+  const base = (e.bases && e.bases[tf]) ?? e.base ?? '', site = sites.get(base), q = e.tier === 1 || !e.tier ? `?g=${g}` : '';
+  const p = fetchSeries(`${base}data/${tf}/${ix.file[symbol]}`, !!(site && site.cat.gz), q).then((d) => { if (!d) throw new Error(`${symbol}: no ${tf} data in the shared set`); return decodeSeries(d); });
   files.set(key, { g, p }); // callers that arrive while it loads share the one request
   const mine = () => { const cur = files.get(key); return cur && cur.p === p; }; // not replaced by a newer build's request
   try { const data = await p; if (mine()) files.set(key, { g, data }); return data; }

@@ -169,8 +169,11 @@ data site as a shard and the page merges the two, taking each timeframe of a sym
 site has it; if the data site cannot be read, what is on it is left out and everything else works.
 More shards can be added the same way, and a build that would publish more than a site may hold
 stops instead. Files are published in a compact form (bar times as gaps in the largest step that
-divides them, the dividend adjustment as runs of a factor) that the page decodes, about 30% smaller
-than plain columns.
+divides them, the dividend adjustment as runs of a factor), about 30% smaller than plain columns,
+and gzip-compressed on top (`<symbol>.json.gz`): Pages counts a site's size as stored, so this
+gives each site about three times the room. The page inflates them itself (the browser's
+`DecompressionStream`: Chrome 80, Safari 16.4, Firefox 113 or newer). A build copies a carried,
+unchanged file's bytes rather than compressing it again, so only refreshed series cost time.
 
 Foreign stocks are priced in their own currency; the Markets view converts their dollar volume
 with the core currency pairs. World markets are refreshed on the US schedule, so a market that

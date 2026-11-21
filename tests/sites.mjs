@@ -1,6 +1,7 @@
 // node tests/sites.mjs — the shared page's data set split over several sites (web/js/static.js:
 // mergeSites): one symbol's timeframes can come from different sites, lists are unions.
-import { mergeSites, kept } from '../web/js/static.js';
+import { mergeSites, kept, readJsonBytes, fetchSeries } from '../web/js/static.js';
+import { gzipSync } from 'node:zlib';
 import { check, done } from './fixture.mjs';
 
 const DATA = 'https://example.github.io/meridian-data/';
@@ -23,4 +24,20 @@ check('fund families and indexes are the union of every site\'s', ix.families.Va
 check('the catalogs read are not changed by merging', main.symbols[1].tfs.join() === '1h' && main.families.Vanguard.length === 2 && !('bases' in main.symbols[1]));
 check('this page\'s own settings are kept', ix.shards.length === 1);
 check('what a symbol has, in words', kept(['1h', '1d']) === 'daily and hourly history' && kept(['1d']) === 'daily history' && kept(['5m', '1h', '1d']) === 'daily, hourly and five-minute history' && kept(['1m', '5m', '1h', '1d']) === 'daily, hourly, five-minute and one-minute history');
+// series files: gzip-compressed on sites built since that change, plain before
+{
+  const doc = { symbol: 'X', t0: 5, step: 60, dt: [1, 2], c: [1.5, 2, 2.5], enc: 1 }, plain = Buffer.from(JSON.stringify(doc)), gz = gzipSync(plain);
+  const a = await readJsonBytes(gz), b = await readJsonBytes(plain), c = await readJsonBytes(gzipSync(gz)), d = await readJsonBytes(gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.length));
+  check('a series file reads the same compressed, plain, compressed twice on the way, or as a raw buffer', [a, b, c, d].every((x) => JSON.stringify(x) === JSON.stringify(doc)));
+  const seen = [], site = (files, status = 404) => async (url) => { seen.push(url); const f = files[url.split('?')[0]]; return f ? { ok: true, status: 200, arrayBuffer: async () => f } : { ok: false, status }; };
+  const one = await fetchSeries('D/1d/AAL', true, '?g=7', site({ 'D/1d/AAL.json.gz': gz }));
+  check('a compressed site: the .json.gz file is read, with the query kept', JSON.stringify(one) === JSON.stringify(doc) && seen.join() === 'D/1d/AAL.json.gz?g=7');
+  seen.length = 0;
+  const two = await fetchSeries('D/1d/AAL', true, '', site({ 'D/1d/AAL.json': plain }));
+  check('a page holding a catalog from before the switch still finds the file under its other name', JSON.stringify(two) === JSON.stringify(doc) && seen.join() === 'D/1d/AAL.json.gz,D/1d/AAL.json');
+  seen.length = 0;
+  check('no file under either name: null', (await fetchSeries('D/1d/ZZZ', false, '', site({}))) === null && seen.join() === 'D/1d/ZZZ.json,D/1d/ZZZ.json.gz');
+  let threw = ''; try { await fetchSeries('D/1d/AAL', true, '', site({}, 503)); } catch (e) { threw = e.message; }
+  check('a server error is reported, not taken for a missing file', threw === 'HTTP 503');
+}
 done('sites');

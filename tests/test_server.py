@@ -387,14 +387,41 @@ with tempfile.TemporaryDirectory() as tdir:
         json.dump(snap.encode_series(carried), open(os.path.join(prevd, "data", "1d", "ZZQ.json"), "w"))
         asked.clear(); res = bld.refresh(("ZZQ", "1d"))
         check(f"refresh: carried broad daily history fetched as {rng_kept or 'five years'} -> asks for {want}", res[2] == "fresh" and asked == [want], str((res, asked)))
-    written = snap.decode_series(json.load(open(os.path.join(outd, "data", "1d", "ZZQ.json"))))
+    written = snap.decode_series(snap.read_json_bytes(open(os.path.join(outd, "data", "1d", "ZZQ.json.gz"), "rb").read()))
     check("refresh: a joined series keeps the range its history was fetched with", written.get("rng") == "10y")
     # a weekly whole fetch that comes back truncated keeps the published history
     carried = {**pub, "symbol": "ZZQ", "full": int(time.time()) - 30 * 86400, "fetched": int(time.time()) - 3600, "meta": {"type": "EQUITY"}}
     json.dump(snap.encode_series(carried), open(os.path.join(prevd, "data", "1d", "ZZQ.json"), "w"))
     bld.yahoo = lambda sym, tf, rng=None, tries=4: {**short, "symbol": "ZZQ", "meta": {"type": "EQUITY"}}
     res = bld.refresh(("ZZQ", "1d"))
-    written = snap.decode_series(json.load(open(os.path.join(outd, "data", "1d", "ZZQ.json"))))
+    written = snap.decode_series(snap.read_json_bytes(open(os.path.join(outd, "data", "1d", "ZZQ.json.gz"), "rb").read()))
     check("refresh: a truncated whole fetch keeps the published history and says so", res[2] == "fresh" and len(written["t"]) == 102 and any("kept the 100 published" in n for n in bld.notes), str((res, len(written["t"]), bld.notes)))
     snap.TIER.pop("ZZQ")
+# published series files are gzip-compressed; builds before that published plain .json
+import gzip
+big = dser(range(100, 2600), [10 + (i % 97) * 0.37 for i in range(2500)], fetched=5)
+zb, plain = snap.series_bytes(big), json.dumps(snap.encode_series(big), separators=(",", ":")).encode()
+check("format: a series file is the compact JSON, gzip-compressed, the same bytes every time", zb[:2] == b"\x1f\x8b" and gzip.decompress(zb) == plain and snap.series_bytes(big) == zb and len(zb) * 2 < len(plain))
+check("format: a JSON file reads back compressed, plain, or compressed twice on the way", snap.read_json_bytes(zb) == json.loads(plain) and snap.read_json_bytes(plain) == json.loads(plain) and snap.read_json_bytes(gzip.compress(zb)) == json.loads(plain))
+with tempfile.TemporaryDirectory() as tdir:
+    prevd, outd = os.path.join(tdir, "prev"), os.path.join(tdir, "out")
+    for d_ in (os.path.join(prevd, "data", "1d"), os.path.join(prevd, "data", "1h"), os.path.join(outd, "data", "1d"), os.path.join(outd, "data", "1h")):
+        os.makedirs(d_)
+    one = {**big, "symbol": "GZA", "meta": {"type": "EQUITY", "name": "A"}}
+    open(os.path.join(prevd, "data", "1d", "GZA.json.gz"), "wb").write(snap.series_bytes(one))
+    old_plain = {**big, "symbol": "OLDP", "tf": "1h", "meta": {"type": "EQUITY", "name": "P"}}
+    json.dump(snap.encode_series(old_plain), open(os.path.join(prevd, "data", "1h", "OLDP.json"), "w"))
+    bld = snap.Build(outd, None, 9, prevd)
+    snap.TIER.update({"GZA": (3, snap.BROAD_KEEP), "OLDP": (3, snap.BROAD_KEEP)})
+    stored = bld.previous_file("1d", "GZA")
+    check("previous build: a compressed file is read, and its bytes are offered for reuse", stored is not None and stored[0] == snap.series_bytes(one) and stored[1]["c"][-1] == one["c"][-1])
+    res = [bld.carry(("GZA", "1d")), bld.carry(("OLDP", "1h"))]
+    out_a = open(os.path.join(outd, "data", "1d", "GZA.json.gz"), "rb").read()
+    out_p = snap.decode_series(snap.read_json_bytes(open(os.path.join(outd, "data", "1h", "OLDP.json.gz"), "rb").read()))
+    check("carry: an unchanged series is published as the same bytes; a plain file from an older build comes out compressed",
+          all(r[2] == "carried" for r in res) and out_a == open(os.path.join(prevd, "data", "1d", "GZA.json.gz"), "rb").read()
+          and len(out_p["t"]) == snap.BROAD_KEEP["1h"] and out_p["t"][-1] == old_plain["t"][-1] and not os.path.exists(os.path.join(outd, "data", "1h", "OLDP.json")))
+    check("carry: a series cut shorter than before is compressed again, not copied", len(bld.previous_file("1h", "OLDP")[1]["t"]) == 2500)
+    for k_ in ("GZA", "OLDP"):
+        snap.TIER.pop(k_)
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)
