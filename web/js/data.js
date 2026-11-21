@@ -225,6 +225,8 @@ export async function getBatch(symbols, tf, { limit = 0, onProgress, maxAge = 60
 }
 
 export async function searchSymbols(q) { return (await backend()).search(q); }
+// The shared page's screening files (web/js/screen.js), or null with a server (nothing is precomputed there).
+export async function screenFiles() { const be = await backend(); return be.screens ? be.screens() : null; }
 
 /**
  * Map a series computed on a higher timeframe onto base bars without lookahead.

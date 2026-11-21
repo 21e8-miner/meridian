@@ -39,7 +39,7 @@ npm test
 | **Charts** | Candles, hollow, Heikin-Ashi, OHLC bars, line, area. 1m to monthly; intraday charts of an open market refresh every 15 seconds. Log scale, volume, volume-by-price. 1, 2 or 4 charts side by side. 66 built-in indicators, each of which can be computed on a higher timeframe and overlaid. Right-click a bar to anchor a VWAP there. Optional dividend-adjusted prices. Drawing tools: trendline, ray, horizontal line, rectangle, Fibonacci, note, measure; points snap to the nearest open/high/low/close (hold Alt for free placement). Drawings are saved per symbol. Crosshairs are linked across charts; drag the price axis to zoom it, arrow keys pan. |
 | **Markets** | A whole list at once: heat map grouped by sector (color = change over 1 day to 1 year, area = dollar volume or equal), advancers and decliners, share above the 50- and 200-day averages, 52-week closing highs and lows, a table per sector, strongest and weakest. Click a tile to open its chart, a sector to zoom into it. |
 | **Auto analysis** | Trendlines through swing pivots (with touch counts and break detection), support / resistance zones, Fibonacci retracement of the dominant swing, 20 candlestick patterns, chart patterns (double top / bottom, head & shoulders, triangles, wedges, channels, rectangle), open gaps. A side panel lists what was found plus a multi-timeframe trend table. |
-| **Scanner** | Conditions built by pointing and clicking or typed as text (`close > sma(200) and rsi(14) < 30 @1w`): indicator vs indicator or value, crosses, candlestick patterns, auto-analysis signals, each on its own timeframe. Built-in lists or any watchlist. Ten presets. Results save to a watchlist or CSV. |
+| **Scanner** | Filters on daily values (change over 1 day to 1 year, dollar and relative volume, RSI, distance from the 50 and 200 SMA and the 52-week range, ATR, gap), then conditions built by pointing and clicking or typed as text (`close > sma(200) and rsi(14) < 30 @1w`): indicator vs indicator or value, crosses, candlestick patterns, auto-analysis signals, each on its own timeframe. Built-in lists or any watchlist. Ten presets. Results save to a watchlist or CSV. On the shared page the filters and the presets run on all 8,834 symbols at once (below). |
 | **Strategy Tester** | Entry and exit rules from the same builder, long or short, stop / target / trailing stop / time exit, fees and slippage. Report with equity vs buy & hold, drawdown, a year-by-year table, trade list (CSV export), trades drawn on the chart. Dividends included by default. **Sweep a setting** runs a range of values for any number in the strategy and shows in-sample next to out-of-sample. Runs one symbol or a whole list. |
 | **Alerts & Bots** | Price-level alerts, alerts on a line you drew (right-click the chart), multi-factor rule alerts. Paper bots track a tested strategy forward from the moment of deployment. |
 | **Indicator Studio** | Write indicators in JavaScript. Saved scripts work on charts and inside scan, strategy and alert conditions. |
@@ -179,12 +179,33 @@ version, so a browser never runs a mix of two builds' code.
 
 What differs from running locally: only the listed symbols have history (plus any `XYZ:` live
 market); broad symbols have no timeframe shorter than five minutes (two weeks of it), extended
-ones keep about four sessions of one-minute bars, and neither has a live estimate; a scan over a big list downloads about 0.13 MB per
-symbol the first time; 1-minute
+ones keep about four sessions of one-minute bars, and neither has a live estimate; a scan with
+conditions other than an unchanged preset downloads about 0.13 MB per symbol that passes its
+filters, the first time; 1-minute
 history is about a day deep; and exchange prints are as old as that series' last refresh (the
 status line says how old) with estimates bridging to now where a proxy exists. The Markets view
 reads a year of daily closes per symbol from one file for the core and extended lists, and a
 second, larger one only when a list includes broad symbols.
+
+**Screening every symbol at once.** A scan of every shared symbol would download over a gigabyte
+of history, so each build answers the common questions in advance: after the snapshot,
+`tools/screen.mjs` runs the page's own code (`web/js/screen.js`, the same indicators and rule
+evaluator) over every daily file the site publishes and writes `data/screen.json`, about 1 MB for
+all 8,834 symbols across both sites: each symbol's filter values, and for every preset how many
+bars ago it last matched (the newest ten bars). The Scanner answers filters, and an unchanged
+preset on the daily timeframe, from those files in a fraction of a second; other conditions are
+scanned from downloaded history, for the symbols that passed the filters only. `tests/screen.mjs`
+checks that the instant answers equal a scan of the files, and they were compared on 900 real
+symbols for every preset (no differences).
+
+**Daily signals feed.** The main site's build also keeps `signals.xml`, an Atom feed with one entry
+per US session: what each preset matched at that close, across both sites, most traded first.
+A session is added once both sites have screened its finished bars (its day must be over where
+each market is), so it appears shortly after midnight New York time. Subscribe in any feed reader:
+https://21e8-miner.github.io/meridian/signals.xml
+
+**Tests gate publishing.** Both workflows run `npm test` before building; a commit that fails them
+is not published, and the sites keep their last good build until a later run passes.
 
 To change the lists, edit `tools/make_universe.py` or feed it newer input files (its docstring
 says where each comes from) and run it. The liquidity cutoffs need `tools/liquidity_probe.py`
@@ -261,6 +282,8 @@ web/js/static.js     data backend for the shared page: snapshot + live fill in t
 web/js/markets.js    Markets view: breadth, heat map, sector table, movers
 web/universe.json    stock list with sectors (written by tools/make_universe.py)
 tools/snapshot.py    builds the shared site (three tiers, rolling refresh)
+tools/screen.mjs     screens every symbol a built site publishes; the daily signals feed
+web/js/screen.js     screening row, presets, instant answers (page and build share it)
 web/js/conditions.js rule model, evaluator and builder UI      web/js/formula.js  rules as text
 web/js/engine.js     backtest engine        web/js/sim.js   rules -> engine glue
 web/js/research.js   yearly breakdown and parameter sweep

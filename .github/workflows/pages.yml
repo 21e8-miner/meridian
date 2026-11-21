@@ -34,6 +34,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # a commit that breaks the tests is not published: the site keeps its last good build, and the
+      # next run (booked below either way) tries again
+      - name: Test
+        run: npm test
       # Most of the wider symbol list is not refetched on a given build but carried over from the
       # last one. That build is downloaded here as it was uploaded (not read back from the public
       # site, which would spend the site's bandwidth allowance on its own upkeep).
@@ -53,6 +60,10 @@ jobs:
         # the broad tier is published by the meridian-data repository (data-site/pages.yml); this
         # site carries the rest and tells the page where that one is
         run: python tools/snapshot.py _site --part=main --shard="https://${GITHUB_REPOSITORY_OWNER}.github.io/meridian-data/" --prev=prev --site="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
+      # the Scanner's filters and presets for every symbol here, answered in advance (data/screen.json),
+      # and the daily signals feed (signals.xml), which also reads the data site's screen
+      - name: Screen every symbol
+        run: node tools/screen.mjs _site --part=main --prev=prev --shard="https://${GITHUB_REPOSITORY_OWNER}.github.io/meridian-data/" --site="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

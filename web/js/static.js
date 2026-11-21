@@ -411,6 +411,20 @@ export async function pack(broad = false) {
   return { generated: main.generated, s };
 }
 
+// Every site's screening file (tools/screen.mjs), this site's first. A site without one (an older
+// build, or a data site that cannot be read) is left out: the Scanner downloads its files instead.
+const screenAt = {};
+export async function screens() {
+  await loadIndex();
+  const out = [];
+  for (const [base, site] of sites) {
+    const hit = screenAt[base];
+    if (hit && hit.g === site.generated) { out.push(hit.data); continue; }
+    try { const data = await getJson(`${base}data/screen.json?g=${site.generated}`); screenAt[base] = { g: site.generated, data }; out.push(data); } catch { /* none there */ }
+  }
+  return out;
+}
+
 export async function batch(symbols, tf, limit = 0, live = false) {
   const out = { bars: {}, errors: {} }, queue = symbols.slice();
   const worker = async () => {

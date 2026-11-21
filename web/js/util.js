@@ -23,6 +23,9 @@ export function h(tag, attrs, ...kids) {
 // Like el.append, but skips null/false so callers can write `cond ? node : null`.
 export const add = (el, ...kids) => { for (const k of kids.flat(Infinity)) if (k != null && k !== false) el.append(k.nodeType ? k : document.createTextNode(String(k))); return el; };
 export const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };
+// el.append(...) for a list that may hold nothing-to-show entries: DOM append would write a null as
+// the text "null" (h() already skips them for its children).
+export function appendAll(el, ...kids) { el.append(...kids.flat(Infinity).filter((k) => k != null && k !== false)); return el; }
 export const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const uid = () => Math.random().toString(36).slice(2, 10);
 export const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
