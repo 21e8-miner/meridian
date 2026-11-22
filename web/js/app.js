@@ -9,6 +9,7 @@ import { evalRuleset, requiredTfs, describeCond, savedRulesets } from './conditi
 import * as alerts from './alerts.js';
 import { loadCustomIndicators } from './studio.js';
 import { loadModels } from './lab.js';
+import { Stream, follows, applyTick } from './stream.js';
 
 const $ = (id) => document.getElementById(id);
 const mkInd = (id, params = {}) => ({ uid: uid(), id, params, tf: null, hidden: false, colors: {} });
@@ -55,6 +56,7 @@ class Panel {
       if (token !== this.token) return;
       const fresh = this.bars !== bars;
       this.bars = bars;
+      catchUp(bars);
       this.chart.setOptions({ type: this.cfg.type, log: this.cfg.log, volume: this.cfg.volume, vp: this.cfg.vp });
       if (fresh || !keepView) this.chart.setBars(bars, { keepView });
       if (!keepView) { this.chart.setDrawings(loadDrawings(symbol)); this.chart.setTrades(this.tradesFor === symbol + '|' + tf ? this.trades : []); }
@@ -71,6 +73,7 @@ class Panel {
       }
       if (!keepView) { this.bars = null; this.chart.setBars(null); this.chart.setMessage(`${symbol}: ${e.message}`); }
     }
+    syncStream();
     if (this.idx === state.active) renderAnalysis();
   }
   async compute() {
@@ -112,6 +115,36 @@ class Panel {
   }
 }
 
+// ───────────────────────── live trades pushed from Hyperliquid ─────────────────────────
+// Charts and watchlist rows that follow a Hyperliquid market move with each of its trades (see
+// stream.js); the polls below still re-anchor them to the exchange.
+let wlRender = 0;
+const stream = new Stream((coin, px, at, candle) => {
+  for (const p of panels) {
+    const b = p.bars, f = follows(b);
+    if (f && f.coin === coin && applyTick(b, px, at, wallNow(b.meta.tz), candle)) { p.chart.tick(); if (p.idx === state.active) updateStatus(); }
+  }
+  let moved = false;
+  for (const [s, w] of wl.follow) {
+    const q = wl.quotes.get(s);
+    if (w.coin !== coin || !q || at / 1000 <= w.asof) continue;
+    const v = px * w.ratio;
+    q.last = v; q.chg = (v / w.base - 1) * 100; q.spark = [...q.spark.slice(0, -1), v]; moved = true;
+  }
+  if (moved && !wlRender) wlRender = setTimeout(() => { wlRender = 0; renderWatchlist(); }, 1000);
+});
+// A series just polled: bring it up to the newest trade already seen.
+function catchUp(b) {
+  const f = follows(b), l = f && stream.latest(f.coin);
+  if (l) applyTick(b, l.px, l.at, wallNow(b.meta.tz), l.candle);
+}
+function syncStream() {
+  const coins = new Set();
+  for (const p of panels) { const f = follows(p.bars); if (f) coins.add(f.coin); }
+  for (const w of wl.follow.values()) coins.add(w.coin);
+  stream.want(coins);
+}
+
 // What the active chart is actually showing: when its newest bar is from, and how far behind the
 // feed's own clock runs. The provider's "last trade" time alone is not trusted: for futures it reads
 // ten minutes ago even when no bar of the session has been published yet.
@@ -121,22 +154,25 @@ function feedStatus(b, nowUtc = Date.now() / 1000, nowWall = wallNow(b.meta.tz))
   const n = b.t.length, intr = isIntraday(b.tf), lag = b.meta.asof ? nowUtc - b.meta.asof : NaN, barAge = nowWall - b.t[n - 1];
   const parts = [b.symbol];
   if (b.stale) parts.push('provider not answering');
+  const f = follows(b), streamed = !!f && stream.connected && b.live && b.live.tick > nowUtc - 60;
+  const lvAge = (lv) => span(Math.max(0, nowUtc - Math.max(lv.asof, lv.tick || 0))) + ' ago' + (streamed ? ', streaming' : '');
   if (b.live && b.live.kind === 'ext') {
     // a stock outside regular hours: the newest value is a real extended-hours print or an estimate
     const lv = b.live, d = new Date(nowWall * 1000), mins = d.getUTCHours() * 60 + d.getUTCMinutes(), wk = d.getUTCDay() % 6 !== 0;
     const phase = !wk ? 'weekend' : mins >= 240 && mins < 570 ? 'pre-market' : mins >= 960 && mins < 1200 ? 'after hours' : 'overnight';
     const chg = lv.base ? ` ${fmtPrice(lv.price)} (${fmtPct((lv.price / lv.base - 1) * 100)} vs close)` : '';
-    if (lv.isEst) { parts.push(`${phase} estimate via ${lv.src.split(':')[1]} perp (${span(Math.max(0, nowUtc - lv.asof))} ago)${chg}`); parts.push(`last exchange print ${span(lv.anchorAge)} ago`); }
+    if (lv.isEst) { parts.push(`${phase} estimate via ${lv.src.split(':')[1]} perp (${lvAge(lv)})${chg}`); parts.push(`last exchange print ${span(lv.anchorAge)} ago`); }
     else { parts.push(`${phase} · last print ${span(lv.anchorAge)} ago${chg}`); }
     return { text: parts.join(' · '), late: false, live: true };
   }
   if (b.live) {
     // the newest bars are projected from a live market; say so, and say how far the real data reaches
-    parts.push(`live estimate via ${b.live.src.split(':')[1]} (${span(Math.max(0, nowUtc - b.live.asof))} ago)`);
+    parts.push(`live estimate via ${b.live.src.split(':')[1]} (${lvAge(b.live)})`);
     parts.push(`exchange data to ${fmtTime(b.live.anchor)}`);
     if (b.live.anchorAge > 1800) parts.push(`rough: last exchange print ${span(b.live.anchorAge)} ago`);
     return { text: parts.join(' · '), late: false, live: true };
   }
+  if (f && f.kind === 'native' && stream.connected) parts.push('streaming');
   if (!b.meta.open) parts.push('market closed');
   if (b.meta.snapshot) parts.push(`shared snapshot ${span(Math.max(0, nowUtc - b.meta.snapshot))} old`);
   parts.push(intr ? `latest bar ${fmtStamp(b.t[n - 1], true).replace(/^(\w+ \d+), \d+ /, '$1 ')} (${span(barAge)} ago)` : `latest bar ${fmtStamp(b.t[n - 1], false)}`);
@@ -301,7 +337,7 @@ function indicatorSettings(p, c) {
 }
 
 // ───────────────────────── watchlist ─────────────────────────
-const wl = { lists: store.get('watchlists', { Default: ['SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'META', 'GLD', 'TLT', 'BTC-USD'] }), cur: store.get('wl.cur', 'Default'), quotes: new Map() };
+const wl = { lists: store.get('watchlists', { Default: ['SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT', 'NVDA', 'TSLA', 'AMZN', 'META', 'GLD', 'TLT', 'BTC-USD'] }), cur: store.get('wl.cur', 'Default'), quotes: new Map(), follow: new Map() };
 if (!wl.lists[wl.cur]) wl.cur = Object.keys(wl.lists)[0];
 const saveWl = () => { store.set('watchlists', wl.lists); store.set('wl.cur', wl.cur); };
 function spark(vals, up) {
@@ -338,14 +374,18 @@ async function refreshQuotes() {
   const syms = wl.lists[wl.cur] || []; if (!syms.length) return;
   try {
     const { bars } = await getBatch(syms, '1d', { limit: 30, maxAge: 55000, live: true });
+    wl.follow.clear();
     for (const [s, b] of bars) {
       const n = b.c.length; if (n < 2) continue;
-      const lv = b.live, ext = lv && lv.kind === 'ext' && lv.price;
+      const lv = b.live, ext = lv && lv.kind === 'ext' && lv.price, f = follows(b);
+      // rows on a Hyperliquid market (or estimated from one) move with its trades: base is what the change is against
+      if (f) wl.follow.set(s, { coin: f.coin, ratio: f.ratio, base: ext ? b.c[n - 1] : b.c[n - 2], asof: lv ? lv.asof : b.fetched || b.meta.asof || 0 });
       // outside regular hours a stock shows its latest extended print or estimate, against the close
       wl.quotes.set(s, ext ? { last: lv.price, chg: (lv.price / b.c[n - 1] - 1) * 100, spark: [...b.c, lv.price], note: lv.isEst ? `Estimate via ${lv.src.split(':')[1]} perp; change is against the last close` : 'Latest extended-hours print; change is against the last close', est: !!lv.isEst }
         : { last: b.c[n - 1], chg: (b.c[n - 1] / b.c[n - 2] - 1) * 100, spark: b.c, note: lv ? `Live estimate via ${lv.src.split(':')[1]}` : '', est: !!lv });
     }
     renderWatchlist();
+    syncStream();
   } catch { /* keep the previous quotes */ }
 }
 

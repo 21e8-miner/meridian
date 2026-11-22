@@ -149,15 +149,18 @@ check("extended bars continue the 5-minute grid past the close", oe["t"][2] == c
 check("regular bars are untouched", oe["c"][:2] == [99.8, 100.0] and oe["v"][:2] == [500, 900] and rth["t"] == [c16 - 600, c16 - 300] and "live" not in rth)
 check("bars holding a real print are not marked as estimates", le["est"] == [[c16 + 300, c16 + 1500], [c16 + 2100, c16 + 2400]], str(le["est"]))
 check("newest value and change base are reported", le["price"] == oe["c"][-1] and le["base"] == 100.0 and le["isEst"] and le["src"] == "xyz:NVDA" and le["anchor"] == c16 + 1860 and le["anchorAge"] == 2400 + 20 - 1860)
+check("an estimate carries its scale, so the page can move it with each live trade: the last real print over the proxy then",
+      abs(le["ratio"] - 101.5 / pc[c16 + 1800]) < 1e-6 and abs(le["ratio"] * pc[c16 + 2400] - by[c16 + 2400][4]) < 1e-4, str(le.get("ratio")))
 od2 = server.splice_ext({**rth, "tf": "1d", "t": [c16 - 86400 - 16 * 3600, c16 - 16 * 3600], "a": [1, 2]}, extd, pu, "1d", "xyz:NVDA", utc(c16 + 2400) + 20)
 check("a daily bar is the regular session: bars unchanged, indicated price added", od2["c"] == [99.8, 100.0] and od2["live"]["from"] is None and od2["live"]["price"] == le["price"] and od2["live"]["bars"] == 0 and "a" in od2)
 on = server.splice_ext(rth, extd, [], "5m", None, utc(c16 + 2400) + 20)
-check("without a proxy only real prints are added, flagged as real", on["live"]["src"] is None and on["live"]["est"] == [] and not on["live"]["isEst"] and on["live"]["bars"] == 2 and on["t"][-1] == c16 + 1800)
+check("without a proxy only real prints are added, flagged as real", on["live"]["src"] is None and on["live"]["est"] == [] and not on["live"]["isEst"] and on["live"]["bars"] == 2 and on["t"][-1] == c16 + 1800 and "ratio" not in on["live"])
 check("nothing after the close yet: data is returned as it is", server.splice_ext(rth, {k: [] for k in "tohlcv"}, [], "5m", None, utc(c16 + 30)) is rth)
 check("a print in the minute still forming is not dated in the future", server.splice_ext(rth, extd, [], "5m", None, utc(c16 + 1800) + 10)["live"]["anchorAge"] == 0)
 # hours
 check("regular session for estimates starts at 09:30, extended hours 04:00-20:00 on weekdays", not so("NVDA", at(2026, 11, 17, 9, 27), lag=0) and so("NVDA", at(2026, 11, 17, 9, 27)) and so("NVDA", at(2026, 11, 17, 9, 30), lag=0) and server.extended_hours(at(2026, 11, 17, 4, 0)) and server.extended_hours(at(2026, 11, 17, 19, 59)) and not server.extended_hours(at(2026, 11, 17, 20, 0)) and not server.extended_hours(sat) and not server.extended_hours(at(2026, 11, 17, 3, 59)))
-check("stock proxies: same-name perps plus the index and metal ETFs, no futures roots", server.STOCK_PROXY["NVDA"] == "xyz:NVDA" and server.STOCK_PROXY["SPY"] == "xyz:SP500" and server.STOCK_PROXY["QQQ"] == "xyz:XYZ100" and "CL" not in server.STOCK_PROXY and "GOLD" not in server.STOCK_PROXY and "IBM" not in server.STOCK_PROXY and len(server.STOCK_PROXY) == 39)
+check("stock proxies: same-name perps plus the index and metal ETFs, no futures roots", server.STOCK_PROXY["NVDA"] == "xyz:NVDA" and server.STOCK_PROXY["SPY"] == "xyz:SP500" and server.STOCK_PROXY["QQQ"] == "xyz:XYZ100" and "CL" not in server.STOCK_PROXY and "GOLD" not in server.STOCK_PROXY and "IBM" not in server.STOCK_PROXY and len(server.STOCK_PROXY) == 42)
+check("stock proxies admitted by tools/proxy_check.py on 2026-11-22 are in; its rejects are not", all(server.STOCK_PROXY.get(s) == "xyz:" + s for s in ("PLTR", "CBRS", "SKHX")) and not {"GME", "BABA", "LLY", "NFLX"} & set(server.STOCK_PROXY) and not {"NG=F", "HG=F", "6E=F", "6J=F"} & set(server.LIVE_PROXY))
 try:
     server.parse_chart({"chart": {"result": None, "error": {"description": "No data found"}}}, "Z", "1d"); check("error surfaced", False)
 except RuntimeError as e:

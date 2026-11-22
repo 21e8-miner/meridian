@@ -76,8 +76,10 @@ LIVE_PROXY = {
 # Across long stretches, reading the estimate one minute BEFORE the next real print (15 names):
 #   overnight 20:00 -> 04:00   median 9.5 bp, worst 42     (holding the last print: 75 bp, worst 314)
 #   weekend, Fri 20:00 -> Mon  median 14 bp,  worst 27     (holding the last print: 55 bp, worst 612)
+# PLTR, CBRS and SKHX were added on 2026-11-22 by tools/proxy_check.py (same tests, newest 3.5 days):
+#   PLTR 8.8 bp vs 20.4 held, CBRS 16.7 vs 33.1, SKHX 29.3 vs 48.9; that run kept no new futures.
 _STOCKS = ("NVDA SKHY SNDK SOXL MU SPCX DRAM AMD GOOGL CRCL AAPL EWY INTC NBIS KORU MSFT TSLA AMZN MSTR "
-           "META COIN MRVL CRWV HOOD MRNA AVGO RKLB TSM IREN ORCL SMH DELL ASML").split()
+           "META COIN MRVL CRWV HOOD MRNA AVGO RKLB TSM IREN ORCL SMH DELL ASML PLTR CBRS SKHX").split()
 STOCK_PROXY = {**{n: "xyz:" + n for n in _STOCKS},
                "SPY": "xyz:SP500", "QQQ": "xyz:XYZ100", "GLD": "xyz:GOLD", "IAU": "xyz:GOLD", "SLV": "xyz:SILVER", "USO": "xyz:CL"}
 MAX_PROXY_MINUTES = 15000  # paged, 5000 candles a request; covers a long holiday weekend
@@ -634,12 +636,17 @@ def splice_ext(data: dict, ext: dict, proxy: list, tf: str, coin: str | None, no
     wall = _wall_fn(data["meta"].get("tz"))
     rth_end = T[k] + 16 * 3600 if daily else T[k] + INTERVAL_SEC[tf]
     rows = [r for r in zip(ext["t"], ext["o"], ext["h"], ext["l"], ext["c"], ext["v"]) if r[0] >= rth_end]
-    mins, last_real = stock_minutes(rth_end, data["c"][k], rows, [(wall(u), o, h, l, c) for (u, o, h, l, c) in proxy], wall(now))
+    pw = [(wall(u), o, h, l, c) for (u, o, h, l, c) in proxy]
+    mins, last_real = stock_minutes(rth_end, data["c"][k], rows, pw, wall(now))
     if not mins:
         return data
     last_real = min(last_real, wall(now))  # a print in the minute still forming ends "now"
     live = {"kind": "ext", "src": coin if any(m[6] for m in mins) else None, "anchor": last_real, "anchorAge": int(wall(now) - last_real),
             "asof": int(now), "price": _round(mins[-1][4]), "base": data["c"][k], "isEst": bool(mins[-1][6]), "partial": False}
+    if mins[-1][6]:  # the scale of the newest estimate, so the page can move it with each live trade
+        p = next((r for r in reversed(pw) if r[0] == mins[-1][0]), None)
+        if p and p[4]:
+            live["ratio"] = round(mins[-1][4] / p[4], 6)
     out = dict(data)
     if daily:
         out["live"] = {**live, "from": None, "bars": 0, "est": []}

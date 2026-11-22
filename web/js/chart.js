@@ -63,6 +63,8 @@ export class Chart {
     }
     this.buildLegend(); this.invalidate();
   }
+  // The newest bar changed in place (a streamed trade): redraw without resetting anything.
+  tick() { this.ha = null; this.lgI = -1; this.updateLegend(); this.invalidate(); }
   setMessage(m) { this.msgEl.textContent = m || ''; }
   setIndicators(list) { this.inds = list; this.buildLegend(); this.invalidate(); }
   setAuto(a) { this.auto = a || {}; this.lgI = -1; this.invalidate(); }

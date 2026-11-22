@@ -29,6 +29,7 @@ npm test
 | `tests/formula.mjs` | rules as text: round trips, alternate spellings, error messages |
 | `tests/lab.mjs` | model lab: split, embargo, no output on training bars |
 | `tests/markets.mjs` | Markets view: period changes by calendar (holidays, month ends, year to date), breadth, treemap layout (areas, bounds, no overlap), tile colors |
+| `tests/stream.mjs` | streamed trades: which charts follow which market, how a trade moves an estimate (ratio, poll time, bar bounds, daily sessions untouched), new bars from pushed candles, subscriptions and reconnects against a stand-in socket |
 | `tests/parity.mjs` | the browser port of the live fill and of the market summary rows gives the same results as the Python (cases written by `tests/make_parity.py`) |
 | `tests/test_server.py` | provider parsing: null rows, stub bars, wall-clock times, duplicate sessions, adjusted closes; market sessions; the live fill (projection maths, agreement across timeframes, market hours); the shared-site build (which series are due, across closes, weekends, holidays and a clock change); the metrics (text format, histogram arithmetic, provider failure counting, the `/metrics` endpoint on a live local server) |
 
@@ -101,7 +102,8 @@ What to keep in mind:
   has printed again.
 - The live markets can also be charted directly, with real volume and no estimate involved: type
   `XYZ100`, or any `XYZ:` name (`XYZ:SP500`, `XYZ:GOLD`, `XYZ:NVDA`, …). They trade 24/7.
-- Other symbols are unchanged: currencies run about a minute behind, crypto a few seconds. The
+- Other symbols are unchanged: currencies run about a minute behind, crypto a few seconds (Yahoo's
+  crypto bars were 4–16 s old when checked on 2026-11-22, so a perpetual would add little there). The
   status line at the top right always says what the active chart is showing: live estimate
   (green), delayed, market closed, or amber when a market is open but no new bars have arrived.
 
@@ -109,7 +111,7 @@ What to keep in mind:
 
 A stock chart continues past the 16:00 close. Where the exchange printed in the pre-market or
 after hours (04:00–20:00 ET on weekdays) those prints are shown as they are; that works for every
-stock. Where there are no prints — overnight, weekends, a thin pre-market — 39 stocks and ETFs
+stock. Where there are no prints — overnight, weekends, a thin pre-market — 42 stocks and ETFs
 are filled in from the Hyperliquid perpetual on the same name, scaled to the last real print, so
 each new print re-anchors the estimate. Estimated bars are faded; the stretch is shaded and
 labelled "outside regular hours". Daily bars are never changed (a daily bar is the regular
@@ -128,6 +130,26 @@ next real print arrived (15 liquid names):
 A name is only given a proxy if the 10-minute projection beat holding the last print by 40% or
 more on a perp trading at least $1M a day; 56 other listed names failed that and get real prints
 only. Backtests, the model lab and seasonality always read exchange bars only.
+
+`tools/proxy_check.py` repeats both tests on the newest data (Hyperliquid keeps about 3.5 days of
+1-minute candles) for any `SYMBOL=COIN` pair, or for its own list of candidates. Its run on
+2026-11-22 added PLTR (8.8 bp projected against 20.4 held), CBRS (16.7 / 33.1) and SKHX
+(29.3 / 48.9). It rejected GME, BABA, LLY, NFLX, ARM, BE, AMAT, TLT, LITE and BB (gain or volume too
+low), and did not have enough prints to judge COST, IBM, STRC, QCOM or EWZ. No left-out future
+passed: natural gas 3.0x, copper 2.8x, platinum 2.9x, Nikkei 2.1x, palladium 1.8x, heating oil
+0.8x. On the euro, yen and pound futures the old price is only 1.5–1.8 bp off ten minutes later, and
+the perpetual did no better.
+
+### Streaming
+
+Charts that follow a Hyperliquid market — an `XYZ:` chart, a future's live estimate, a stock's
+overnight or weekend estimate — and watchlist rows on one take every trade as it happens, over
+Hyperliquid's WebSocket (`web/js/stream.js`), on the local app and the shared page alike. A trade
+moves the newest bar by the same ratio the last poll used, so it shows what the next poll would; the
+polls (every 5 s for estimates) still re-anchor to the exchange and add the next bar. An `XYZ:`
+chart opens its next bar from the pushed candle as soon as the minute turns. The status line adds
+"streaming" while the line is up. If it drops, it reconnects with growing waits and the polls carry
+on as before.
 
 ## The shared page
 
@@ -294,6 +316,8 @@ web/js/chart.js      canvas chart
 web/js/data.js       fetch, cache, derived timeframes, higher-timeframe alignment
 metrics.py           Prometheus metrics registry and text format    monitoring/  scrape config, alert rules
 web/js/static.js     data backend for the shared page: snapshot + live fill in the browser
+web/js/stream.js     trades pushed from Hyperliquid (WebSocket) onto charts and the watchlist
+tools/proxy_check.py measures whether a Hyperliquid market is a good live proxy for a future or stock
 web/js/markets.js    Markets view: breadth, heat map, sector table, movers
 web/universe.json    stock list with sectors (written by tools/make_universe.py)
 tools/snapshot.py    builds the shared site (four tiers, rolling refresh)

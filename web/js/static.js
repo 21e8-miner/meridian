@@ -174,10 +174,15 @@ export function spliceExt(data, ext, proxy, tf, coin, now) {
   const rthEnd = daily ? T[k] + 16 * 3600 : T[k] + SEC[tf];
   const rows = [];
   for (let i = 0; i < ext.t.length; i++) if (ext.t[i] >= rthEnd) rows.push([ext.t[i], ext.o[i], ext.h[i], ext.l[i], ext.c[i], ext.v[i]]);
-  const [mins, lastReal0] = stockMinutes(rthEnd, data.c[k], rows, proxy.map(([u, o, h, l, c]) => [wall(u), o, h, l, c]), wall(now));
+  const pw = proxy.map(([u, o, h, l, c]) => [wall(u), o, h, l, c]);
+  const [mins, lastReal0] = stockMinutes(rthEnd, data.c[k], rows, pw, wall(now));
   if (!mins.length) return data;
   const lastReal = Math.min(lastReal0, wall(now)), tail = mins[mins.length - 1];
   const live = { kind: 'ext', src: mins.some((m) => m[6]) ? coin : null, anchor: lastReal, anchorAge: Math.floor(wall(now) - lastReal), asof: Math.floor(now), price: round(tail[4]), base: data.c[k], isEst: !!tail[6], partial: false };
+  if (tail[6]) { // the scale of the newest estimate, so the page can move it with each live trade
+    let p = null; for (let i = pw.length - 1; i >= 0; i--) if (pw[i][0] === tail[0]) { p = pw[i]; break; }
+    if (p && p[4]) live.ratio = Number((tail[4] / p[4]).toFixed(6));
+  }
   if (daily) return { ...data, live: { ...live, from: null, bars: 0, est: [] } };
   const { cols, added, runs } = mergeMinutes(data, k, mins, tf);
   const out = { ...data, ...cols };
