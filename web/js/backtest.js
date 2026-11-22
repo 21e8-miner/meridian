@@ -5,7 +5,7 @@ import { TFS, tfLabel, isIntraday, universes } from './data.js';
 import { IND, defaultParams } from './ta.js';
 import { ruleBuilder, describeRuleset, cmp, price, num, ind, newRuleset } from './conditions.js';
 import { prepare, simulate } from './sim.js';
-import { yearly, knobs, getPath, setPath, sweep } from './research.js';
+import { yearly, knobs, getPath, setPath, sweep, splitAudit, monteCarlo, costSensitivity } from './research.js';
 import { api } from './api.js';
 import { addBot } from './alerts.js';
 
@@ -57,6 +57,7 @@ export function mount(el) {
         h('input', { type: 'checkbox', checked: cfg.adjusted !== false, onchange: (e) => { cfg.adjusted = e.target.checked; persist(); } }), 'Include dividends')),
       h('div', { class: 'row', style: { marginTop: '12px' } },
         h('button', { class: 'primary', onclick: run }, 'Run backtest'),
+        h('button', { onclick: runStress, title: 'Out-of-sample split, Monte Carlo resampling and execution cost sensitivity' }, 'Stress test'),
         h('button', { onclick: sweepDialog, title: 'Try a range of values for one setting, judged on data it was not chosen on' }, 'Sweep a setting…'),
         h('button', { onclick: runList, title: 'Run the same rules on every symbol in a list' }, 'Run on a list…'),
         h('button', { onclick: deploy, title: 'Track this strategy forward from now as a paper bot' }, 'Deploy as paper bot')));
@@ -69,7 +70,7 @@ async function run() {
   clear(resEl); resEl.append(h('div', { class: 'empty' }, `Loading ${cfg.symbol}…`));
   try {
     const { base, byTf } = await prepare(cfg.symbol, cfg), out = simulate(base, byTf, cfg);
-    last = { base, ...out, cfg: JSON.parse(JSON.stringify(cfg)) };
+    last = { base, byTf, ...out, cfg: JSON.parse(JSON.stringify(cfg)) };
     report();
   } catch (e) { clear(resEl); resEl.append(h('div', { class: 'empty' }, `Could not run: ${e.message}`)); }
 }
@@ -81,6 +82,7 @@ function report() {
   const yrs = yearly(base, res), pos = yrs.filter((r) => r.ret > 0).length, beat = yrs.filter((r) => r.ret > r.bh).length;
   add(resEl,
     h('div', { class: 'row' }, h('h2', null, `${c.symbol} · ${tfLabel(c.tf)} · ${c.side}`), h('span', { class: 'muted' }, `${fmtStamp(base.t[res.from], intr)} → ${fmtStamp(base.t[n - 1], intr)} (${s.years.toFixed(1)} years)${base.adjusted ? ' · dividends included' : ''}`), h('span', { class: 'spacer' }),
+      h('button', { onclick: stressReport, title: 'Out-of-sample split, Monte Carlo resampling and execution cost sensitivity' }, 'Stress test'),
       h('button', { onclick: exportTrades, title: 'Download every trade as a CSV file' }, 'Export CSV'),
       h('button', { onclick: () => api.showTrades(c.symbol, c.tf, res.trades) }, 'Show trades on chart')),
     h('p', { class: 'hint' }, `Enter: ${describeRuleset(c.entry, c.tf)}  ·  Exit: ${describeRuleset(c.exit, c.tf)}`),
@@ -118,6 +120,119 @@ function exportTrades() {
   const rows = [['symbol', 'side', 'entry_time', 'entry_price', 'exit_time', 'exit_price', 'bars', 'exit_reason', 'return_pct', 'pnl', 'open']];
   for (const t of res.trades) rows.push([c.symbol, t.side, f(t.entryT), t.entryP.toFixed(4), f(t.exitT), t.exitP.toFixed(4), t.bars, t.reason, t.pnlPct.toFixed(4), t.pnl.toFixed(2), t.open ? 'yes' : '']);
   downloadText(`${c.symbol}-${c.tf}-trades.csv`, toCsv(rows), 'text/csv');
+}
+
+// ───────────────────────── stress test & robustness ─────────────────────────
+async function runStress() {
+  clear(resEl); resEl.append(h('div', { class: 'empty' }, `Running stress test on ${cfg.symbol}…`));
+  try {
+    const { base, byTf } = await prepare(cfg.symbol, cfg), out = simulate(base, byTf, cfg);
+    last = { base, byTf, ...out, cfg: JSON.parse(JSON.stringify(cfg)) };
+    await new Promise((r) => setTimeout(r, 20));
+    stressReport();
+  } catch (e) { clear(resEl); resEl.append(h('div', { class: 'empty' }, `Could not stress test: ${e.message}`)); }
+}
+
+function stressReport() {
+  const { base, byTf, res, stats: s, cfg: c } = last, intr = isIntraday(c.tf), n = base.t.length;
+  const sp = splitAudit(base, res);
+  const mc = monteCarlo(base, res, { trials: 1000, seed: 42, sizePct: +c.sizePct || 100 });
+  const cs = costSensitivity(base, byTf, c);
+  const fmtPf = (v) => (v === Infinity ? '∞' : fmtNum(v, 2));
+  const fmtBps = (v) => (v === Infinity ? `> ${cs.maxBreakevenBps} bps` : `${fmtNum(v, 1)} bps`);
+  const headroom = cs.breakevenBps === Infinity ? Infinity : cs.breakevenBps - cs.currentRtBps;
+
+  const notes = [];
+  if (s.trades < 30) notes.push(`Only ${s.trades} trades — sample size is too small for reliable statistical inference.`);
+  else {
+    notes.push(sp.oos.netPct > 0
+      ? `Out-of-sample held positive (${fmtPct(sp.oos.netPct, 1)}${Number.isFinite(sp.efficiency) ? `, ${fmtNum(sp.efficiency, 2)}× IS CAGR` : ''}).`
+      : `Out-of-sample turned negative (${fmtPct(sp.oos.netPct, 1)}) after ${fmtPct(sp.is.netPct, 1)} in-sample.`);
+    if (Number.isFinite(mc.sharpe.ci95Lo)) {
+      notes.push(mc.sharpe.ci95Lo > 0
+        ? `Bootstrap 95% Sharpe CI (${fmtNum(mc.sharpe.ci95Lo, 2)} to ${fmtNum(mc.sharpe.ci95Hi, 2)}) stays above zero.`
+        : `Bootstrap 95% Sharpe CI (${fmtNum(mc.sharpe.ci95Lo, 2)} to ${fmtNum(mc.sharpe.ci95Hi, 2)}) crosses zero — edge is not statistically separated from noise.`);
+    }
+  }
+  notes.push(cs.breakevenBps === 0
+    ? 'Strategy is unprofitable even at 0 bps friction.'
+    : cs.breakevenBps === Infinity
+      ? `Edge survives beyond ${cs.maxBreakevenBps} bps round-trip friction.`
+      : `Edge breaks even at ${fmtNum(cs.breakevenBps, 1)} bps round-trip (${headroom >= 0 ? `+${fmtNum(headroom, 1)}` : fmtNum(headroom, 1)} bps vs configured ${fmtNum(cs.currentRtBps, 1)} bps).`);
+
+  clear(resEl);
+  const fanCanvas = h('canvas', { class: 'plot' }), costCanvas = h('canvas', { class: 'plot' });
+  const splitRows = [
+    ['Net return', fmtPct(sp.is.netPct, 1), fmtPct(sp.oos.netPct, 1), sign(sp.is.netPct), sign(sp.oos.netPct)],
+    ['CAGR', fmtPct(sp.is.cagr, 1), fmtPct(sp.oos.cagr, 1), sign(sp.is.cagr), sign(sp.oos.cagr)],
+    ['Buy & hold', fmtPct(sp.is.buyHold, 1), fmtPct(sp.oos.buyHold, 1), sign(sp.is.buyHold), sign(sp.oos.buyHold)],
+    ['Sharpe', fmtNum(sp.is.sharpe, 2), fmtNum(sp.oos.sharpe, 2), '', ''],
+    ['Max drawdown', fmtPct(sp.is.maxDD, 1), fmtPct(sp.oos.maxDD, 1), 'dn', 'dn'],
+    ['Trades', String(sp.is.trades), String(sp.oos.trades), '', ''],
+    ['Win rate', sp.is.trades ? fmtNum(sp.is.winRate, 1) + '%' : '–', sp.oos.trades ? fmtNum(sp.oos.winRate, 1) + '%' : '–', '', ''],
+    ['Profit factor', fmtPf(sp.is.profitFactor), fmtPf(sp.oos.profitFactor), '', ''],
+    ['Avg trade', fmtPct(sp.is.avgTrade, 2), fmtPct(sp.oos.avgTrade, 2), sign(sp.is.avgTrade), sign(sp.oos.avgTrade)],
+  ];
+
+  add(resEl,
+    h('div', { class: 'row' },
+      h('h2', null, `Stress test · ${c.symbol} · ${tfLabel(c.tf)} · ${c.side}`),
+      h('span', { class: 'muted' }, `${fmtStamp(base.t[res.from], intr)} → ${fmtStamp(base.t[n - 1], intr)} (${s.years.toFixed(1)} years)`),
+      h('span', { class: 'spacer' }),
+      h('button', { onclick: report }, 'Back to report')),
+    h('p', { class: 'hint' }, `Enter: ${describeRuleset(c.entry, c.tf)}  ·  Exit: ${describeRuleset(c.exit, c.tf)}`),
+    h('div', { class: 'card', style: { margin: '8px 0' } }, notes.join(' ')),
+
+    h('h4', null, `In-sample vs out-of-sample · split at ${fmtStamp(base.t[sp.split], intr)} (70 / 30)`),
+    h('div', { class: 'cards' },
+      stat('OOS net return', fmtPct(sp.oos.netPct, 1), `in-sample ${fmtPct(sp.is.netPct, 1)}`, sign(sp.oos.netPct)),
+      stat('OOS efficiency', Number.isFinite(sp.efficiency) ? fmtNum(sp.efficiency, 2) + '×' : '–', 'OOS CAGR / IS CAGR', sp.efficiency >= 0.5 ? 'up' : sp.efficiency < 0 ? 'dn' : ''),
+      stat('OOS Sharpe', fmtNum(sp.oos.sharpe, 2), `in-sample ${fmtNum(sp.is.sharpe, 2)}`, sp.oos.sharpe > 0 ? 'up' : sp.oos.sharpe < 0 ? 'dn' : ''),
+      stat('OOS max drawdown', fmtPct(sp.oos.maxDD, 1), `in-sample ${fmtPct(sp.is.maxDD, 1)}`, 'dn')),
+    h('table', { class: 'grid' },
+      h('thead', null, h('tr', null, ['Metric', `In-sample (${sp.is.years.toFixed(1)}y)`, `Out-of-sample (${sp.oos.years.toFixed(1)}y)`].map((x) => h('th', null, x)))),
+      h('tbody', null, splitRows.map(([m, a, b, ca, cb]) => h('tr', null, h('td', null, m), h('td', { class: ca }, a), h('td', { class: cb }, b))))),
+
+    h('h4', null, `Monte Carlo resampling · ${mc.trials.toLocaleString('en-US')} seeded trials`),
+    h('div', { class: 'cards' },
+      stat('Median net (50th)', fmtPct(mc.net.p50, 1), `actual ${fmtPct(s.netPct, 1)}`, sign(mc.net.p50)),
+      stat('Downside net (5th)', fmtPct(mc.net.p5, 1), `95th ${fmtPct(mc.net.p95, 1)}`, sign(mc.net.p5)),
+      stat('Worst 5% max DD', fmtPct(mc.maxDD.p5, 1), `median ${fmtPct(mc.maxDD.p50, 1)}`, 'dn'),
+      stat('Chance of loss', fmtNum(mc.probLoss, 1) + '%', 'trials ending below start', mc.probLoss <= 10 ? 'up' : mc.probLoss >= 40 ? 'dn' : ''),
+      stat('Sharpe 95% CI', Number.isFinite(mc.sharpe.ci95Lo) ? `${fmtNum(mc.sharpe.ci95Lo, 2)} → ${fmtNum(mc.sharpe.ci95Hi, 2)}` : '–',
+        Number.isFinite(mc.sharpe.probPositive) ? `${fmtNum(mc.sharpe.probPositive, 0)}% > 0 · ${mc.sharpe.blockSize}-bar blocks` : 'per-bar block bootstrap',
+        mc.sharpe.ci95Lo > 0 ? 'up' : '')),
+    mc.trades > 0 ? h('p', { class: 'hint' }, 'Resampled trade-sequence equity fan: 5th (red), 50th (grey), 95th (green) percentiles vs actual trade path (amber).') : null,
+    mc.trades > 0 ? fanCanvas : null,
+
+    h('h4', null, 'Execution cost sensitivity · round-trip friction'),
+    h('div', { class: 'cards' },
+      stat('Breakeven friction', fmtBps(cs.breakevenBps), 'round-trip where net = 0%', cs.breakevenBps > cs.currentRtBps ? 'up' : 'dn'),
+      stat('Configured friction', `${fmtNum(cs.currentRtBps, 1)} bps`, `${fmtNum((+c.feeBps || 0) + (+c.slipBps || 0), 1)} bps / side`),
+      stat('Friction headroom', headroom === Infinity ? `> ${fmtNum(cs.maxBreakevenBps - cs.currentRtBps, 0)} bps` : `${headroom >= 0 ? '+' : ''}${fmtNum(headroom, 1)} bps`, 'margin above current cost', headroom > 10 ? 'up' : headroom <= 0 ? 'dn' : '')),
+    costCanvas,
+    h('table', { class: 'grid' },
+      h('thead', null, h('tr', null, ['Round-trip', 'Per side', 'Net return', 'CAGR', 'Sharpe', 'Max DD', 'Profit factor', 'Avg trade'].map((x) => h('th', null, x)))),
+      h('tbody', null, cs.rows.map((r) => h('tr', null,
+        h('td', null, `${r.rtBps} bps`), h('td', null, `${fmtNum(r.perSideBps, 1)} bps`),
+        h('td', { class: sign(r.netPct) }, fmtPct(r.netPct, 1)), h('td', { class: sign(r.cagr) }, fmtPct(r.cagr, 1)),
+        h('td', null, fmtNum(r.sharpe, 2)), h('td', { class: 'dn' }, fmtPct(r.maxDD, 1)),
+        h('td', null, fmtPf(r.profitFactor)), h('td', { class: sign(r.avgTrade) }, fmtPct(r.avgTrade, 2)))))));
+
+  const css = getComputedStyle(document.documentElement), col = (k) => css.getPropertyValue(k).trim();
+  whenVisible(costCanvas, () => {
+    if (mc.trades > 0) {
+      lineChart(fanCanvas, [
+        { values: mc.fan.p5, color: col('--down'), width: 1.2 },
+        { values: mc.fan.p50, color: col('--muted'), width: 1.2 },
+        { values: mc.fan.p95, color: col('--up'), width: 1.2 },
+        { values: mc.fan.actual, color: col('--accent'), width: 1.8 },
+      ], { xLabels: (i) => `#${mc.fan.steps[i]}`, yFmt: (v) => '$' + fmtNum(v, 0), height: 190 });
+    }
+    lineChart(costCanvas, [{ values: cs.rows.map((r) => r.netPct), color: col('--accent'), width: 1.8 }], {
+      xLabels: (i) => `${cs.rows[i].rtBps}bp`, yFmt: (v) => v.toFixed(0) + '%', zero: true, height: 160,
+    });
+  });
 }
 
 // ───────────────────────── parameter sweep ─────────────────────────

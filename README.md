@@ -25,7 +25,7 @@ npm test
 | File | Covers |
 | --- | --- |
 | `tests/smoke.mjs` | all 66 indicators on daily and 5-minute bars (one value per bar, finite, unchanged when the future is removed), reference values by hand, timeframe aggregation, higher-timeframe alignment, dividend adjustment, automated analysis |
-| `tests/engine.mjs` | fills, fees, slippage, sizing, stops, targets, trailing and time exits, short side, rule evaluation, multi-timeframe rules, yearly table, parameter sweep, statistics |
+| `tests/engine.mjs` | fills, fees, slippage, sizing, stops, targets, trailing and time exits, short side, rule evaluation, multi-timeframe rules, yearly table, parameter sweep, IS/OOS split audit, Monte Carlo resampling, execution cost sensitivity, statistics |
 | `tests/formula.mjs` | rules as text: round trips, alternate spellings, error messages |
 | `tests/lab.mjs` | model lab: split, embargo, no output on training bars |
 | `tests/markets.mjs` | Markets view: period changes by calendar (holidays, month ends, year to date), breadth, treemap layout (areas, bounds, no overlap), tile colors |
@@ -40,7 +40,7 @@ npm test
 | **Markets** | A whole list at once: heat map grouped by sector (color = change over 1 day to 1 year, area = dollar volume or equal), advancers and decliners, share above the 50- and 200-day averages, 52-week closing highs and lows, a table per sector, strongest and weakest. Click a tile to open its chart, a sector to zoom into it. |
 | **Auto analysis** | Trendlines through swing pivots (with touch counts and break detection), support / resistance zones, Fibonacci retracement of the dominant swing, 20 candlestick patterns, chart patterns (double top / bottom, head & shoulders, triangles, wedges, channels, rectangle), open gaps. A side panel lists what was found plus a multi-timeframe trend table. |
 | **Scanner** | Filters on daily values (change over 1 day to 1 year, dollar and relative volume, RSI, distance from the 50 and 200 SMA and the 52-week range, ATR, gap), then conditions built by pointing and clicking or typed as text (`close > sma(200) and rsi(14) < 30 @1w`): indicator vs indicator or value, crosses, candlestick patterns, auto-analysis signals, each on its own timeframe. Built-in lists or any watchlist. Ten presets. Results save to a watchlist or CSV. On the shared page the filters and the presets run on every symbol at once (below). |
-| **Strategy Tester** | Entry and exit rules from the same builder, long or short, stop / target / trailing stop / time exit, fees and slippage. Report with equity vs buy & hold, drawdown, a year-by-year table, trade list (CSV export), trades drawn on the chart. Dividends included by default. **Sweep a setting** runs a range of values for any number in the strategy and shows in-sample next to out-of-sample. Runs one symbol or a whole list. |
+| **Strategy Tester** | Entry and exit rules from the same builder, long or short, stop / target / trailing stop / time exit, fees and slippage. Report with equity vs buy & hold, drawdown, a year-by-year table, trade list (CSV export), trades drawn on the chart. Dividends included by default. **Stress test** audits the 70 / 30 in-sample vs out-of-sample split, runs 1,000 deterministic Monte Carlo resamples (return & drawdown distributions, equity fan, block-bootstrap Sharpe 95% CI), and traces execution cost sensitivity to the exact breakeven friction. **Sweep a setting** runs a range of values for any number in the strategy and shows in-sample next to out-of-sample. Runs one symbol or a whole list. |
 | **Alerts & Bots** | Price-level alerts, alerts on a line you drew (right-click the chart), multi-factor rule alerts. Paper bots track a tested strategy forward from the moment of deployment. |
 | **Indicator Studio** | Write indicators in JavaScript. Saved scripts work on charts and inside scan, strategy and alert conditions. |
 | **Model Lab** | Logistic regression or boosted stumps predicting "up more than X% in N bars" from indicator inputs. Fitted on the first 70% of history, scored on the last 30% with an embargo between them. A saved model becomes an indicator. |
@@ -301,7 +301,7 @@ tools/screen.mjs     screens every symbol a built site publishes; the daily sign
 web/js/screen.js     screening row, presets, instant answers (page and build share it)
 web/js/conditions.js rule model, evaluator and builder UI      web/js/formula.js  rules as text
 web/js/engine.js     backtest engine        web/js/sim.js   rules -> engine glue
-web/js/research.js   yearly breakdown and parameter sweep
+web/js/research.js   yearly breakdown, parameter sweep, IS/OOS split audit, Monte Carlo & cost sensitivity
 web/js/app.js        shell, panels, toolbar, watchlist, analysis panel
 web/js/{scanner,backtest,alerts,studio,lab,seasonality}.js   the other views
 ```
