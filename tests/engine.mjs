@@ -3,7 +3,7 @@ import { runBacktest, summarize } from '../web/js/engine.js';
 import { evalRuleset, evalCond, cmp, price, num, ind, newRuleset } from '../web/js/conditions.js';
 import { aggregate, adjust } from '../web/js/data.js';
 import { simulate } from '../web/js/sim.js';
-import { yearly, knobs, sweep, getPath, setPath } from '../web/js/research.js';
+import { yearly, knobs, sweep, getPath, setPath, splitAudit, monteCarlo, costSensitivity } from '../web/js/research.js';
 import { IND, defaultParams, sma, calcIndicator, cleanParams } from '../web/js/ta.js';
 import { parseWorkspace, toCsv } from '../web/js/util.js';
 import { dailyBars, cut, check, done } from './fixture.mjs';
@@ -63,4 +63,70 @@ const c = { tf: '1d', years: '5', side: 'long', entry, exit, stopPct: 0, targetP
 // ── helpers ──
 check('csv quoting', toCsv([['a', 'b,c', 'say "hi"'], [1, null, 2.5]]) === 'a,"b,c","say ""hi"""\n1,,2.5\n');
 { const ok = JSON.stringify({ app: 'meridian', data: { 'meridian.theme': '"dark"', 'other.key': '1', 'meridian.x': '[1,2]' } }); check('workspace file: keeps only its own keys', parseWorkspace(ok).length === 2); let m = ''; try { parseWorkspace('{"app":"x","data":{}}'); } catch (err) { m = err.message; } check('workspace file: rejects strangers', /not a Meridian/.test(m)); m = ''; try { parseWorkspace(JSON.stringify({ app: 'meridian', data: { 'meridian.a': '{bad' } })); } catch (err) { m = err.message; } check('workspace file: rejects damaged items', /damaged/.test(m)); }
+// ── stress test: IS/OOS split audit, Monte Carlo resampling, execution cost sensitivity ──
+{
+  const { res, stats } = simulate(d, new Map(), c);
+  const sp = splitAudit(d, res);
+  check('splitAudit: IS × OOS compounds to full run (strategy and buy & hold)',
+    near((1 + sp.is.netPct / 100) * (1 + sp.oos.netPct / 100), 1 + stats.netPct / 100) &&
+    near((1 + sp.is.buyHold / 100) * (1 + sp.oos.buyHold / 100), 1 + stats.buyHold / 100));
+  check('splitAudit: trade counts sum and windows abut cleanly',
+    sp.is.trades + sp.oos.trades === res.trades.length && sp.is.to + 1 === sp.oos.from &&
+    Math.abs((sp.split - sp.from) / (n - sp.from) - 0.7) < 0.002);
+  check('splitAudit: efficiency matches OOS CAGR / IS CAGR',
+    sp.is.cagr > 0 ? near(sp.efficiency, sp.oos.cagr / sp.is.cagr) : Number.isNaN(sp.efficiency));
+  const emptySp = splitAudit(d, runBacktest(d, F, F, {}));
+  check('splitAudit: zero-trade run produces clean zeros and NaN efficiency',
+    emptySp.is.netPct === 0 && emptySp.oos.netPct === 0 && emptySp.is.trades === 0 && emptySp.oos.trades === 0 && Number.isNaN(emptySp.efficiency));
+}
+{
+  const { res, stats } = simulate(d, new Map(), { ...c, sizePct: 50 });
+  const mc1 = monteCarlo(d, res, { trials: 400, seed: 123, sizePct: 50 });
+  const mc2 = monteCarlo(d, res, { trials: 400, seed: 123, sizePct: 50 });
+  const mc3 = monteCarlo(d, res, { trials: 400, seed: 999, sizePct: 50 });
+  check('monteCarlo: deterministic for the same seed', JSON.stringify(mc1) === JSON.stringify(mc2));
+  check('monteCarlo: different seed changes draws', mc1.net.p50 !== mc3.net.p50 || mc1.sharpe.p50 !== mc3.sharpe.p50);
+  check('monteCarlo: quantile ordering and bounds hold',
+    mc1.net.p5 <= mc1.net.p25 && mc1.net.p25 <= mc1.net.p50 && mc1.net.p50 <= mc1.net.p75 && mc1.net.p75 <= mc1.net.p95 &&
+    mc1.maxDD.p5 <= mc1.maxDD.p50 && mc1.maxDD.p50 <= mc1.maxDD.p95 && mc1.maxDD.p95 <= 0 &&
+    mc1.probLoss >= 0 && mc1.probLoss <= 100);
+  const fanOrdered = mc1.fan.steps.every((_, j) => mc1.fan.p5[j] <= mc1.fan.p50[j] + 1e-9 && mc1.fan.p50[j] <= mc1.fan.p95[j] + 1e-9);
+  const lastActual = mc1.fan.actual[mc1.fan.actual.length - 1];
+  check('monteCarlo: equity fan is ordered and actual terminal equity matches backtest',
+    fanOrdered && near(lastActual, res.equity[n - 1], 1e-4), `actual ${lastActual.toFixed(2)} vs ${res.equity[n - 1].toFixed(2)}`);
+  check('monteCarlo: block-bootstrap Sharpe matches observed and has ordered 95% CI',
+    near(mc1.sharpe.observed, stats.sharpe, 1e-9) &&
+    mc1.sharpe.ci95Lo <= mc1.sharpe.p5 && mc1.sharpe.p5 <= mc1.sharpe.p50 && mc1.sharpe.p50 <= mc1.sharpe.p95 && mc1.sharpe.p95 <= mc1.sharpe.ci95Hi &&
+    mc1.sharpe.probPositive >= 0 && mc1.sharpe.probPositive <= 100);
+  const emptyMc = monteCarlo(d, runBacktest(d, F, F, {}), { trials: 100, seed: 7 });
+  check('monteCarlo: zero trades handled without NaN in return/DD',
+    emptyMc.trades === 0 && emptyMc.net.p50 === 0 && emptyMc.maxDD.p5 === 0 && emptyMc.probLoss === 0 && Number.isNaN(emptyMc.sharpe.observed));
+  // Synthetic constant-return trades verify exact compounding, zero DD, and 0% / 100% loss probability.
+  const synthRes = { capital: 10000, from: 0, equity: d.c.map(() => 10000), trades: Array.from({ length: 20 }, () => ({ pnlPct: 2 })) };
+  const winMc = monteCarlo(d, synthRes, { trials: 200, seed: 1 });
+  const loseMc = monteCarlo(d, { ...synthRes, trades: Array.from({ length: 20 }, () => ({ pnlPct: -2 })) }, { trials: 200, seed: 1 });
+  check('monteCarlo: constant +2% / -2% trades give exact 0% / 100% loss probability and zero DD on winners',
+    winMc.probLoss === 0 && winMc.maxDD.p5 === 0 && near(winMc.net.p5, winMc.net.p95) &&
+    near(winMc.net.p50, (Math.pow(1.02, 20) - 1) * 100) && loseMc.probLoss === 100 && loseMc.net.p95 < 0);
+}
+{
+  const cCost = { ...c, feeBps: 3, slipBps: 2 };
+  const cs = costSensitivity(d, new Map(), cCost, { levels: [0, 5, 10, 15, 25, 40, 60], maxBreakevenBps: 200 });
+  const mono = cs.rows.every((r, i) => i === 0 || r.netPct <= cs.rows[i - 1].netPct + 1e-9);
+  const s0 = simulate(d, new Map(), { ...cCost, feeBps: 0, slipBps: 0 }).stats;
+  const s10 = simulate(d, new Map(), { ...cCost, feeBps: 5, slipBps: 0 }).stats;
+  check('costSensitivity: net return decreases monotonically with friction and matches simulate()',
+    mono && near(cs.rows[0].netPct, s0.netPct) && near(cs.rows[2].netPct, s10.netPct) && cs.currentRtBps === 10 && cCost.feeBps === 3);
+  if (cs.breakevenBps > 0 && Number.isFinite(cs.breakevenBps)) {
+    const atBe = simulate(d, new Map(), { ...cCost, feeBps: cs.breakevenBps / 2, slipBps: 0 }).stats.netPct;
+    const belowBe = simulate(d, new Map(), { ...cCost, feeBps: Math.max(0, (cs.breakevenBps - 0.5) / 2), slipBps: 0 }).stats.netPct;
+    const aboveBe = simulate(d, new Map(), { ...cCost, feeBps: (cs.breakevenBps + 0.5) / 2, slipBps: 0 }).stats.netPct;
+    check('costSensitivity: bisected breakeven friction crosses 0% accurately',
+      Math.abs(atBe) < 0.1 && belowBe > 0 && aboveBe <= 0, `breakeven ${cs.breakevenBps} bps -> ${atBe.toFixed(3)}%`);
+  } else {
+    check('costSensitivity: breakeven friction is valid (0 or Infinity)', cs.breakevenBps === 0 || cs.breakevenBps === Infinity);
+  }
+  const losing = costSensitivity(d, new Map(), { ...cCost, side: 'short', entry: newRuleset([cmp(price('close'), 'gt', num(0))]), exit: newRuleset([]), maxBars: 0 });
+  check('costSensitivity: unprofitable strategy at 0 bps has 0 breakeven friction', losing.rows[0].netPct < 0 && losing.breakevenBps === 0);
+}
 done('engine');
