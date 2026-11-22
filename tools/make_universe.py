@@ -30,6 +30,11 @@ its last 20 sessions. With it, "broad" also takes smaller stocks (market cap fro
 and any other ETF, as long as they trade at least STOCK_MIN_DV / ETF_MIN_DV a day. Run this again
 when the index changes; nothing else reads the input files.
 
+Which symbols the probe has to measure is this script's own answer, so the list cannot go stale:
+
+    python3 tools/make_universe.py sp500.csv screener.json --etfs=etf.json --candidates=candidates.json
+    python3 tools/make_universe.py sp500.csv --intl=intl.json --crypto=crypto.json --candidates-intl=candidates_intl.json
+
 --intl and --crypto come from tools/fetch_lists.py (world index members from Wikipedia, the
 largest coins from CoinGecko matched to Yahoo tickers); --checked is tools/liquidity_probe.py run
 over them. Every index member the provider has data for is kept ("intl", daily history); coins
@@ -94,21 +99,28 @@ COIN_MIN_DV = 1e6      # crypto volume comes in dollars
 # match wins. Anything that matches none is left without a sector.
 SECTOR_WORDS = [
     ("Real Estate", r"real estate|reit|propert"),
+    # labels that the broad words below would send to the wrong sector, first
+    ("Consumer Staples", r"drug and grocery|grocery|non-?cyclical"),  # "Personal Care, Drug and Grocery Stores" is not health care
+    ("Financials", r"finance and credit|credit serv"),            # "...Credit Services" is not "IT services"
+    ("Industrials", r"energy technolog"),                         # Siemens Energy: turbines and grid equipment
+    ("Consumer Discretionary", r"cyclical"),
     ("Health Care", r"health|pharma|biotech|medic|drug"),  # before technology: "biotechnology"
-    ("Information Technology", r"technolog|software|semiconductor|electronic|electric machinery|precision instrument|it serv|computer"),
+    ("Information Technology", r"technolog|software|semiconductor|electronic|electric machinery|precision instrument|\bit serv|computer"),
     ("Communication Services", r"telecom|communication|media|entertainment|broadcast|publishing|internet"),
     ("Financials", r"bank|financ|insur|securities|investment|asset manag|capital market|exchange"),
     ("Energy", r"oil|petroleum|coal|energy|gas producer|mining.*fuel"),
-    ("Utilities", r"utilit|electric power|electricity|water|^gas$|gas, water"),
+    ("Utilities", r"utilit|electric power|electricity|water|^gas$|gas, water|^power$"),
     ("Materials", r"material|chemical|mining|metal|steel|paper|pulp|glass|ceramic|basic resource|rubber|forestry|cement|mineral"),
-    ("Consumer Staples", r"food|beverage|tobacco|staple|grocer|personal care|household product|agricultur|fishery|brew"),
-    ("Consumer Discretionary", r"auto|retail|discretionary|travel|leisure|hotel|apparel|textile|luxury|personal goods|consumer product|homebuild|household goods|restaurant|gaming|casino|consumer serv"),
-    ("Industrials", r"industr|aerospace|defen[cs]e|construct|machinery|transport|engineering|electrical equipment|shipping|shipbuild|rail|airline|air transport|logistic|trading compan|warehous|business serv|support serv|marine"),
+    ("Consumer Staples", r"food|beverage|tobacco|staple|grocer|personal care|household product|agricultur|fishery|brew|defensive|consumer goods|fast moving"),
+    ("Consumer Discretionary", r"consumer durable|e-commerce|auto|retail|discretionary|travel|leisure|hotel|apparel|textile|luxury|personal goods|consumer product|homebuild|household goods|restaurant|gaming|casino|consumer serv"),
+    ("Industrials", r"industr|aerospace|defen[cs]e|construct|machinery|transport|engineering|electrical equipment|shipping|shipbuild|rail|airline|aviation|air transport|logistic|trading compan|warehous|business serv|support serv|marine"),
 ]
 
 
 def sector_of(text: str) -> int:
     t = (text or "").lower()
+    if re.search(r"commerce\W+(amp;)?\s*industry", t):
+        return -1  # Hang Seng's catch-all sub-index (Tencent, PetroChina, China Mobile...): no sector at all
     for name, pat in SECTOR_WORDS:
         if re.search(pat, t):
             return SECTORS.index(name)
@@ -117,6 +129,28 @@ NASDAQ_SECTOR = {"Technology": "Information Technology", "Telecommunications": "
                  "Basic Materials": "Materials", "Consumer Discretionary": "Consumer Discretionary", "Consumer Staples": "Consumer Staples",
                  "Health Care": "Health Care", "Industrials": "Industrials", "Energy": "Energy", "Utilities": "Utilities", "Real Estate": "Real Estate"}
 NOT_COMMON = re.compile(r"\b(preferred|warrants?|rights|units|notes|debentures|subordinated|perpetual|depositary shares,? each representing)\b", re.I)
+# ... but these are ordinary equity whose names trip the words above: American depositary shares of
+# a foreign company ("each representing two Class A ordinary shares"; the Brazilian ones over
+# preferred shares are the issuer's main listed line) and a partnership's common units.
+IS_COMMON = re.compile(r"american depositar|\bADRs?\b|\bADS\b|common units|limited partner|\bl\.?p\.?\s+units\b", re.I)
+
+
+# never ordinary equity, whatever else the name says ("Warrants to purchase American Depositary Shares")
+NEVER_COMMON = re.compile(r"\b(warrants?|notes|debentures)\b", re.I)
+# a SPAC's unit or right, written in the singular at the end of the name ("... Acquisition Corp II Unit")
+ENDS_AS_PART = re.compile(r"\b(unit|right)s?\.?\s*$", re.I)
+
+
+def common_stock(name: str) -> bool:
+    """Is a listing with this name ordinary equity (not a preferred, note, warrant, right or SPAC unit)?"""
+    if "%" in name or NEVER_COMMON.search(name):
+        return False
+    return not ((NOT_COMMON.search(name) or ENDS_AS_PART.search(name)) and not IS_COMMON.search(name))
+
+
+def listed_symbol(raw: str) -> str:
+    """Nasdaq's list writes share classes as BRK/A or LEN.B; the data provider writes BRK-A, LEN-B."""
+    return re.sub(r"[/.]", "-", (raw or "").strip().upper())
 
 
 def broad_from(path: str, taken: set, liq: dict | None = None) -> dict:
@@ -125,17 +159,21 @@ def broad_from(path: str, taken: set, liq: dict | None = None) -> dict:
     liq = liq or {}
     out = {}
     for r in rows:
-        sym = (r.get("symbol") or "").strip().upper().replace("/", "-")
+        sym = listed_symbol(r.get("symbol"))
         try:
             cap = float(r.get("marketCap") or 0)
         except ValueError:
             cap = 0
         traded = (liq.get(sym) or {}).get("dv", 0)
-        big_enough = cap >= BROAD_MIN_CAP or (cap >= SMALL_MIN_CAP and traded >= STOCK_MIN_DV)
+        # no market cap on the list (closed-end funds, some trusts) is "unknown", not "tiny"; and a
+        # second share class (LEN-B, MOG-B) is shown with the whole company's cap though it may
+        # hardly trade: both are in only if they trade enough
+        klass = "-" in sym
+        big_enough = (cap >= BROAD_MIN_CAP and not klass) or ((cap >= SMALL_MIN_CAP or cap == 0 or klass) and traded >= STOCK_MIN_DV)
         if not big_enough or sym in taken or not re.fullmatch(r"[A-Z]{1,5}(-[A-Z])?", sym):
             continue
         name = r.get("name") or ""
-        if NOT_COMMON.search(name) or "%" in name:
+        if not common_stock(name):
             continue
         sec = NASDAQ_SECTOR.get((r.get("sector") or "").strip())
         out[sym] = SECTORS.index(sec) if sec else -1
@@ -151,9 +189,39 @@ def etfs_from(path: str, taken: set, liq: dict) -> list:
     for r in rows:
         sym = (r.get("symbol") or "").strip().upper()
         m = liq.get(sym) or {}
-        if sym not in taken and re.fullmatch(r"[A-Z]{1,5}", sym) and not m.get("gone") and m.get("type") == "ETF" and m.get("dv", 0) >= ETF_MIN_DV:
+        if sym not in taken and re.fullmatch(r"[A-Z]{1,5}", sym) and not m.get("gone") and m.get("type") in FUND_TYPES and m.get("dv", 0) >= ETF_MIN_DV:
             out.add(sym)
     return sorted(out)
+
+
+# What the provider calls a fund on the ETF list: mostly "ETF", but physical trusts and some new
+# listings come back as "EQUITY" (PHYS, PSLV, CEF). Being on the ETF list is what makes it a fund.
+FUND_TYPES = ("ETF", "EQUITY")
+
+
+def etf_symbols(path: str) -> set:
+    with open(path) as f:
+        data = json.load(f)["data"]
+    return {(r.get("symbol") or "").strip().upper() for r in (data.get("data") or data)["rows"]}
+
+
+def candidates(screener: str, etfs: str | None, taken: set) -> dict:
+    """The symbols tools/liquidity_probe.py has to measure before the lists can be decided:
+    stocks whose place depends on how much they trade (under BROAD_MIN_CAP, or no market cap
+    given) and every fund on the ETF list. {"stocks": [...], "etfs": [...]} for the probe."""
+    with open(screener) as f:
+        rows = json.load(f)["data"]["rows"]
+    stocks = set()
+    for r in rows:
+        sym = listed_symbol(r.get("symbol"))
+        try:
+            cap = float(r.get("marketCap") or 0)
+        except ValueError:
+            cap = 0
+        if (cap == 0 or "-" in sym or SMALL_MIN_CAP <= cap < BROAD_MIN_CAP) and sym not in taken and re.fullmatch(r"[A-Z]{1,5}(-[A-Z])?", sym) and common_stock(r.get("name") or ""):
+            stocks.add(sym)
+    funds = {s for s in (etf_symbols(etfs) if etfs else set()) if re.fullmatch(r"[A-Z]{1,5}", s)}
+    return {"stocks": sorted(stocks), "etfs": sorted(funds)}
 
 
 def families_from(path: str) -> dict:
@@ -178,6 +246,27 @@ def main():
         for row in csv.DictReader(f):
             sym = row["Symbol"].strip().upper().replace(".", "-")  # BRK.B -> BRK-B, as the data provider writes it
             stocks[sym] = SECTORS.index(row["GICS Sector"].strip())
+    if "candidates" in opts or "candidates-intl" in opts:
+        # what tools/liquidity_probe.py must measure before the lists can be decided
+        if "candidates" in opts:
+            if len(sys.argv) < 3:
+                sys.exit("--candidates needs the stock screener file")
+            cand = candidates(sys.argv[2], opts.get("etfs"), set(stocks))
+            with open(opts["candidates"], "w") as f:
+                json.dump(cand, f)
+            print(f"{len(cand['stocks'])} stocks and {len(cand['etfs'])} funds to measure -> {opts['candidates']}")
+        if "candidates-intl" in opts:
+            cand = {"stocks": [], "coins": []}
+            if "intl" in opts:
+                with open(opts["intl"]) as f:
+                    cand["stocks"] = sorted({m[0] for v in json.load(f).values() for m in v["members"]})
+            if "crypto" in opts:
+                with open(opts["crypto"]) as f:
+                    cand["coins"] = list(dict.fromkeys(c["yahoo"] for c in json.load(f) if c.get("yahoo")))
+            with open(opts["candidates-intl"], "w") as f:
+                json.dump(cand, f)
+            print(f"{len(cand['stocks'])} world stocks and {len(cand['coins'])} coins to measure -> {opts['candidates-intl']}")
+        return
     n_index = len(stocks)
     sp500 = list(stocks)
     for sector, names in EXTRA.items():
@@ -194,8 +283,10 @@ def main():
     if "liquidity" in opts:
         with open(opts["liquidity"]) as f:
             liq = json.load(f)
+    on_etf_list = etf_symbols(opts["etfs"]) if "etfs" in opts else set()
     funds = sorted(set(ETFS) | {s for k in FULL_FAMILIES for s in families.get(k, [])}
-                   | {s for s, m in (liq or {}).items() if m.get("type") == "ETF" and not m.get("gone") and m.get("dv", 0) >= EXT_ETF_DV and re.fullmatch(r"[A-Z]{1,5}", s)})
+                   | {s for s, m in (liq or {}).items() if not m.get("gone") and m.get("dv", 0) >= EXT_ETF_DV and re.fullmatch(r"[A-Z]{1,5}", s)
+                      and (m.get("type") == "ETF" or (s in on_etf_list and m.get("type") in FUND_TYPES))})
     if liq is None:
         funds = sorted(set(funds) | set(old.get("etfs") or []))  # without the volumes, keep who was promoted before
     taken = set(stocks) | set(funds)
@@ -206,7 +297,7 @@ def main():
         # every fund of a listed family that still trades, however little
         for sym in {s for v in families.values() for s in v} - taken - set(broad):
             m = liq.get(sym) or {}
-            if m.get("type") == "ETF" and not m.get("gone") and m.get("dv", 0) > 0:
+            if m.get("type") in FUND_TYPES and not m.get("gone") and m.get("dv", 0) > 0:
                 broad[sym] = -1
         broad = dict(sorted(broad.items()))
     intl, crypto = old.get("intl") or {}, old.get("crypto") or []
@@ -224,7 +315,8 @@ def main():
             coins = json.load(f)
         with open(opts["checked"]) as f:
             checked = json.load(f)
-        crypto = [c["yahoo"] for c in coins if c.get("yahoo") and (checked.get(c["yahoo"]) or {}).get("type") == "CRYPTOCURRENCY" and checked[c["yahoo"]].get("dv", 0) >= COIN_MIN_DV]
+        # each ticker once: two coins on the list can resolve to the same one
+        crypto = list(dict.fromkeys(c["yahoo"] for c in coins if c.get("yahoo") and (checked.get(c["yahoo"]) or {}).get("type") == "CRYPTOCURRENCY" and checked[c["yahoo"]].get("dv", 0) >= COIN_MIN_DV))
     out = {
         "asof": time.strftime("%Y-%m-%d"),
         "sectors": SECTORS,

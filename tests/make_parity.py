@@ -18,7 +18,8 @@ def wall(utc): return utc + int(datetime.fromtimestamp(utc, ET).utcoffset().tota
 for start in (ts(2026, 11, 13, 0, 0), ts(2026, 7, 9, 0, 0)):
     for k in range(0, 8 * 24 * 60, 37):
         u = start + k * 60
-        for sym in ("NQ=F", "EURUSD=X", "SPY", "BTC-USD", "XYZ:XYZ100"):
+        # the last ones trade elsewhere: each market's own clock decides, with its own daylight saving
+        for sym in ("NQ=F", "EURUSD=X", "SPY", "BTC-USD", "XYZ:XYZ100", "7203.T", "0005.HK", "HSBA.L", "SAP.DE", "BHP.AX", "RELIANCE.NS", "RY.TO", "ADDT-B.ST", "^N225", "^KS11", "^FTSE", "DX-Y.NYB", "BRK-B"):
             for lag in (0, 20):
                 add("sessionOpen", [sym, u, lag], server.session_open(sym, datetime.fromtimestamp(u, ET), lag=lag))
 

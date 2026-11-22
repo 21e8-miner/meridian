@@ -470,7 +470,7 @@ const VIEWS = ['chart', 'markets', 'scanner', 'strategy', 'alerts', 'studio', 'l
 function readHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
   if (!parts.length || !VIEWS.includes(parts[0])) return null;
-  const sym = parts[0] === 'chart' && parts[1] && /^[A-Za-z0-9^=.:\-]{1,24}$/.test(parts[1]) ? parts[1].toUpperCase() : null;
+  const sym = parts[0] === 'chart' && parts[1] && /^[A-Za-z0-9^=.:&\-]{1,24}$/.test(parts[1]) ? parts[1].toUpperCase() : null;
   return { view: parts[0], symbol: sym, tf: sym && TFS.some((t) => t.id === parts[2]) ? parts[2] : null };
 }
 function writeHash() {

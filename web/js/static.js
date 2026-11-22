@@ -34,8 +34,28 @@ export function tzOffset(tz, utc) {
 export function wallFn(tz) { let zone = tz || 'America/New_York'; try { tzOffset(zone, 0); } catch { zone = 'America/New_York'; } return (utc) => Math.floor(utc) + tzOffset(zone, utc); }
 
 // ── market sessions (server.py: session_open) ──
+// Regular hours of the other markets listed, by ticker suffix: [time zone, open, close] in local
+// minutes of the day (server.py: WORLD_SESSIONS; lunch breaks count as open, holidays are not known).
+const WORLD_SESSIONS = {
+  '.T': ['Asia/Tokyo', 540, 930], '.HK': ['Asia/Hong_Kong', 570, 960], '.L': ['Europe/London', 480, 990],
+  '.DE': ['Europe/Berlin', 540, 1050], '.PA': ['Europe/Paris', 540, 1050], '.AS': ['Europe/Amsterdam', 540, 1050],
+  '.MC': ['Europe/Madrid', 540, 1050], '.MI': ['Europe/Rome', 540, 1050], '.SW': ['Europe/Zurich', 540, 1050],
+  '.ST': ['Europe/Stockholm', 540, 1050], '.AX': ['Australia/Sydney', 600, 960], '.NS': ['Asia/Kolkata', 555, 930],
+  '.TO': ['America/Toronto', 570, 960], '.KS': ['Asia/Seoul', 540, 930],
+};
+const WORLD_INDEX = { '^N225': '.T', '^HSI': '.HK', '^FTSE': '.L', '^GDAXI': '.DE', '^STOXX50E': '.DE', '^FCHI': '.PA', '^AXJO': '.AX', '^BSESN': '.NS', '^GSPTSE': '.TO', '^KS11': '.KS' };
+export function worldSession(symbol) {
+  let key = WORLD_INDEX[symbol];
+  if (key === undefined) { const i = symbol.lastIndexOf('.'); key = i > 0 ? symbol.slice(i) : null; }
+  return (key && WORLD_SESSIONS[key]) || null;
+}
 export function sessionOpen(symbol, utc = Date.now() / 1000, lag = LAG_MIN) {
   if (isCrypto(symbol) || hlCoin(symbol)) return true;
+  const w = worldSession(symbol);
+  if (w) { // another market: its own clock, not New York's
+    const loc = new Date((Math.floor(utc) + tzOffset(w[0], utc)) * 1000), m = loc.getUTCHours() * 60 + loc.getUTCMinutes();
+    return (loc.getUTCDay() + 6) % 7 < 5 && (lag ? w[1] - 5 : w[1]) <= m && m <= w[2] + lag;
+  }
   const d = new Date((Math.floor(utc) + tzOffset('America/New_York', utc)) * 1000);
   const wd = (d.getUTCDay() + 6) % 7, mins = d.getUTCHours() * 60 + d.getUTCMinutes(); // Monday = 0
   if (symbol.endsWith('=F')) {
@@ -240,6 +260,7 @@ export async function proxyMinutes(coin, startS) {
 // read before) and the rest of the page works.
 let index = null, indexAt = 0, hlNames = null;
 const sites = new Map(); // base ('' = this site) -> { id, generated, cat }
+const down = new Set();  // data sites that could not be read at the last look
 const files = new Map(); // "tf|SYM" -> { g, data }
 async function getJson(url, opts) { const r = await fetch(url, opts); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
 async function readSite(base) {
@@ -287,7 +308,8 @@ async function loadIndex(force = false) {
   try {
     let changed = await readSite('');
     for (const sh of sites.get('').cat.shards || []) {
-      try { changed = (await readSite(sh.base)) || changed; } catch (e) { console.warn(`data site ${sh.base} unavailable:`, e.message); }
+      try { changed = (await readSite(sh.base)) || changed; if (down.delete(sh.base)) changed = true; }
+      catch (e) { if (!down.has(sh.base)) console.warn(`data site ${sh.base} unavailable:`, e.message); down.add(sh.base); }
     }
     if (!index || changed) index = merge();
     index.generated = sites.get('').generated; indexAt = Date.now();
@@ -334,19 +356,41 @@ export async function fetchSeries(path, gz, q = '', get = fetch) {
   }
   return null;
 }
+// How many decoded series the page keeps in memory besides the ones being loaded. Without a bound
+// a scan of every symbol held over a gigabyte for the life of the tab; a series dropped here is
+// read again through the browser's own cache.
+const FILES_KEPT = 600;
+const DOWN_MSG = 'this part of the shared data is on a second site that cannot be read right now; try again in a minute';
+function remember(key, entry) {
+  files.delete(key); files.set(key, entry); // newest last
+  if (files.size <= FILES_KEPT) return;
+  for (const [k, v] of files) { if (files.size <= FILES_KEPT) break; if (!v.p) files.delete(k); }
+}
+export const cachedSeries = () => files.size; // for tests
 async function loadFile(tf, symbol) {
   const ix = await loadIndex(), key = tf + '|' + symbol, hit = files.get(key), e = ix.by.get(symbol);
-  if (!e || !e.tfs.includes(tf)) throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} has ${kept(e.tfs)} on the shared page; shorter timeframes are kept for the most traded symbols` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
-  if (hit && hit.g === ix.generated) return hit.p || hit.data;
+  if (!e || !e.tfs.includes(tf)) {
+    // while a data site cannot be read, what it holds looks like something this symbol does not have
+    // (only a data site never read can hide timeframes; only the broad tier is split across sites)
+    if ([...down].some((b) => !sites.has(b)) && (!e || e.tier === 3) && tf !== 'x1m') throw Object.assign(new Error(DOWN_MSG), { code: 'down' });
+    throw Object.assign(new Error(e && tf !== 'x1m' ? `${symbol} has ${kept(e.tfs)} on the shared page; shorter timeframes are kept for the most traded symbols` : `${symbol}: no ${tf} data in the shared set`), { code: 'tf' });
+  }
+  // the build this request belongs to is the build of the site that holds the file (a data site
+  // rebuilds on its own schedule); the index object is updated in place, so take it now
+  const base = (e.bases && e.bases[tf]) ?? e.base ?? '', site = sites.get(base), g = (site && site.generated) || ix.generated;
+  if (hit && hit.g === g) { if (!hit.p) remember(key, hit); return hit.p || hit.data; }
   // core files change with every build; the rest change a few times an hour at most, so they are
   // left to the browser's own cache (the site serves them as fresh for ten minutes)
-  const g = ix.generated; // the build this request belongs to: the index object is updated in place
-  const base = (e.bases && e.bases[tf]) ?? e.base ?? '', site = sites.get(base), q = e.tier === 1 || !e.tier ? `?g=${g}` : '';
+  const q = e.tier === 1 || !e.tier ? `?g=${g}` : '';
   const p = fetchSeries(`${base}data/${tf}/${ix.file[symbol]}`, !!(site && site.cat.gz), q).then((d) => { if (!d) throw new Error(`${symbol}: no ${tf} data in the shared set`); return decodeSeries(d); });
   files.set(key, { g, p }); // callers that arrive while it loads share the one request
   const mine = () => { const cur = files.get(key); return cur && cur.p === p; }; // not replaced by a newer build's request
-  try { const data = await p; if (mine()) files.set(key, { g, data }); return data; }
-  catch (err) { if (mine()) files.delete(key); throw err; }
+  try { const data = await p; if (mine()) remember(key, { g, data }); return data; }
+  catch (err) {
+    if (mine()) files.delete(key);
+    if (down.has(base)) throw Object.assign(new Error(DOWN_MSG), { code: 'down' });
+    throw err;
+  }
 }
 const EMPTY = { t: [], o: [], h: [], l: [], c: [], v: [] };
 
@@ -421,14 +465,18 @@ export async function pack(broad = false) {
   };
   const main = await get('', 'pack.json');
   if (!broad) return main;
-  const s = { ...main.s };
+  const s = { ...main.s }, parts = [main.generated];
   // the broad tier's summary is on its data site, or on this one when there is no data site
   const own = !(sites.get('').cat.shards || []).length;
-  for (const base of sites.keys()) {
-    if (base === '' && !own) continue;
-    try { Object.assign(s, (await get(base, 'pack-broad.json')).s); } catch { /* none there (an older build kept everything in pack.json) */ }
+  const want = own ? [''] : (sites.get('').cat.shards || []).map((sh) => sh.base);
+  for (const base of want) {
+    // `key` says which builds the rows came from, with a mark for a part that could not be read:
+    // the Markets view compares it to know whether there is anything new (a data-site build, or
+    // a part that failed last time and reads now)
+    // a summary missing on the page's own site is "none there" (a build that kept everything in pack.json), not a part that failed
+    try { const p = await get(base, 'pack-broad.json'); Object.assign(s, p.s); parts.push(p.generated); } catch (e) { if (!(own && e.message === 'HTTP 404')) parts.push('x'); }
   }
-  return { generated: main.generated, s };
+  return { generated: main.generated, key: parts.join('|'), partial: parts.includes('x'), s };
 }
 
 // Every site's screening file (tools/screen.mjs), this site's first. A site without one (an older

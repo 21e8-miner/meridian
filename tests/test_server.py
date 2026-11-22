@@ -1,5 +1,5 @@
 """Run: python3 tests/test_server.py — parsing of provider chart documents (no network)."""
-import os, sys
+import os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.argv = ["server.py"]
 import server
@@ -313,11 +313,42 @@ for exc in (urllib.error.HTTPError("https://query1.finance.yahoo.com/x", 429, "T
 urllib.request.urlopen = real
 grew = {k: server.M_UP.values.get(k, 0) - before.get(k, 0) for k in server.M_UP.values}
 check("metrics: provider failures are counted by kind and the error still reaches the caller", grew.get(("yahoo", "throttled")) == 1 and grew.get(("yahoo", "timeout")) == 1 and grew.get(("yahoo", "network_error")) == 1, str(grew))
+# the provider's own "no data" answers (an error status with a JSON document) are answers, not failures
+before = dict(server.M_UP.values)
+nodata = lambda: urllib.error.HTTPError("https://query1.finance.yahoo.com/x", 404, "Not Found", {}, io.BytesIO(json.dumps({"chart": {"result": None, "error": {"code": "Not Found", "description": "No data found, symbol may be delisted"}}}).encode()))
+urllib.request.urlopen = fake(nodata()); msg404 = ""
+try: server._fetch_yahoo("GONE", "1d")
+except Exception as e: msg404 = str(e)
+urllib.request.urlopen = fake(urllib.error.HTTPError("https://query1.finance.yahoo.com/x", 502, "Bad Gateway", {}, io.BytesIO(b"<html>bad gateway</html>"))); msg502 = ""
+try: server._fetch_yahoo("X", "1d")
+except Exception as e: msg502 = str(e)
+urllib.request.urlopen = real
+grew = {k: server.M_UP.values.get(k, 0) - before.get(k, 0) for k in server.M_UP.values}
+urllib.request.urlopen = fake(urllib.error.HTTPError("https://query1.finance.yahoo.com/x", 503, "Unavailable", {}, io.BytesIO(json.dumps({"chart": {"result": None, "error": {"code": "Internal Server Error"}}}).encode())))
+try: server._fetch_yahoo("X", "1d")
+except Exception: pass
+urllib.request.urlopen = fake(urllib.error.HTTPError("https://query1.finance.yahoo.com/x", 401, "Unauthorized", {}, io.BytesIO(json.dumps({"finance": {"error": {"code": "Unauthorized"}}}).encode()))); msg401 = ""
+try: server._fetch_yahoo("X", "1d")
+except Exception as e: msg401 = str(e)
+urllib.request.urlopen = real
+grew = {k: server.M_UP.values.get(k, 0) - before.get(k, 0) for k in server.M_UP.values}
+check("metrics: a 'no such symbol' answer counts as no_data and its message reaches the caller; a server error is an http_error even with a chart body; a non-chart document is an error",
+      grew.get(("yahoo", "no_data")) == 1 and grew.get(("yahoo", "http_error")) == 3 and "delisted" in msg404 and msg502 == "HTTP 502 from data provider" and msg401 == "HTTP 401 from data provider", str((grew, msg404, msg502, msg401)))
+# the proxy gauge shows only proxies read lately
+server._proxy_cache["xyz:OLD"] = (time.time() - 3600, 0, [[time.time() - 3600, 1, 1, 1, 1]]); server._proxy_asked["xyz:OLD"] = time.time() - 3600
+server._proxy_cache["xyz:DEAD"] = (time.time() - 3600, 0, [[time.time() - 3600, 1, 1, 1, 1]]); server._proxy_asked["xyz:DEAD"] = time.time() - 15
+server._collect()
+coins = {k[0] for k in server.M_PROXY.values}
+check("metrics: a proxy nobody asks for any more is not reported; one still asked for whose source stopped answering is, and keeps ageing",
+      "xyz:DEAD" in coins and "xyz:OLD" not in coins and server.M_PROXY.values[("xyz:DEAD",)] > 3000, str(coins))
+for k_ in ("xyz:OLD", "xyz:DEAD"): server._proxy_cache.pop(k_); server._proxy_asked.pop(k_)
 # the endpoint, on a real local server
 from http.server import ThreadingHTTPServer
 srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler); port = srv.server_address[1]
 threading.Thread(target=srv.serve_forever, daemon=True).start()
-get = lambda path: urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+# straight to the local server: the default opener would send 127.0.0.1 through http_proxy / HTTP_PROXY if one is set
+_direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+get = lambda path: _direct.open(f"http://127.0.0.1:{port}{path}", timeout=5)
 get("/api/health").read()
 try: get("/api/nope")
 except urllib.error.HTTPError as e: e.read()
@@ -373,30 +404,143 @@ check("truncated answer: a full-length answer, one starting as early, or one far
 check("truncated answer: one that disagrees with the published bars (a split) is used as it is", snap.splice_truncated(pub, dser([197, 198, 199, 200], [9.95, 9.9, 9.95, 10.1])) is None)
 import time
 # a refresh fetches the whole series again when the carried one does not reach as far back as is kept
+DAY0 = int(time.time()) // 86400 - 142          # the fixtures' day 141 is yesterday
+def recent(d): return {**d, "t": [t + DAY0 * 86400 for t in d["t"]]}
 with tempfile.TemporaryDirectory() as tdir:
     prevd, outd = os.path.join(tdir, "prev"), os.path.join(tdir, "out")
-    os.makedirs(os.path.join(prevd, "data", "1d")); os.makedirs(os.path.join(outd, "data", "1d"))
+    for tf_ in ("1d", "1m", "x1m"):
+        os.makedirs(os.path.join(prevd, "data", tf_)); os.makedirs(os.path.join(outd, "data", tf_))
     asked = []
-    fresh = lambda rng: {**dser(range(118, 142), [10 + i for i in range(18, 39)] + [48.5, 50, 51], fetched=int(time.time())), "symbol": "ZZQ", "meta": {"type": "EQUITY"}}
+    fresh = lambda rng: {**recent(dser(range(118, 142), [10 + i for i in range(18, 39)] + [48.5, 50, 51], fetched=int(time.time()))), "symbol": "ZZQ", "meta": {"type": "EQUITY"}}
     bld = snap.Build(outd, None, 9, prevd)
     bld.yahoo = lambda sym, tf, rng=None, tries=4: asked.append(rng) or fresh(rng)
     snap.TIER["ZZQ"] = (3, snap.BROAD_KEEP)
+    def carry_file(d, tf_="1d", name="ZZQ"): json.dump(snap.encode_series(d), open(os.path.join(prevd, "data", tf_, name + ".json"), "w"))
+    def written(tf_="1d", name="ZZQ"): return snap.decode_series(snap.read_json_bytes(open(os.path.join(outd, "data", tf_, name + ".json.gz"), "rb").read()))
     for rng_kept, want in ((None, "10y"), ("10y", "1mo")):
-        carried = {**old, "symbol": "ZZQ", "full": int(time.time()) - 60, "meta": {"type": "EQUITY"}}
+        carried = {**recent(old), "symbol": "ZZQ", "full": int(time.time()) - 60, "meta": {"type": "EQUITY"}}
         if rng_kept: carried["rng"] = rng_kept
-        json.dump(snap.encode_series(carried), open(os.path.join(prevd, "data", "1d", "ZZQ.json"), "w"))
+        carry_file(carried)
         asked.clear(); res = bld.refresh(("ZZQ", "1d"))
         check(f"refresh: carried broad daily history fetched as {rng_kept or 'five years'} -> asks for {want}", res[2] == "fresh" and asked == [want], str((res, asked)))
-    written = snap.decode_series(snap.read_json_bytes(open(os.path.join(outd, "data", "1d", "ZZQ.json.gz"), "rb").read()))
-    check("refresh: a joined series keeps the range its history was fetched with", written.get("rng") == "10y")
+    check("refresh: a joined series keeps the range its history was fetched with", written().get("rng") == "10y")
+    # the whole series is fetched again a week after the last whole fetch, not before
+    for age_days, want in ((6, ["1mo"]), (8, ["10y"])):
+        carry_file({**recent(old), "symbol": "ZZQ", "rng": "10y", "full": int(time.time()) - age_days * 86400, "meta": {"type": "EQUITY"}})
+        asked.clear(); res = bld.refresh(("ZZQ", "1d"))
+        check(f"refresh: history last fetched whole {age_days} days ago -> asks for {want[0]}", res[2] == "fresh" and asked == want and (age_days < 7 or abs(written()["full"] - time.time()) < 60), str((res, asked)))
+    # a join window that cannot reach the carried bars is not asked for: one request, not two
+    stale = {**old, "t": [t + (DAY0 - 40) * 86400 for t in old["t"]], "symbol": "ZZQ", "rng": "10y", "full": int(time.time()) - 60, "meta": {"type": "EQUITY"}}
+    carry_file(stale); asked.clear(); res = bld.refresh(("ZZQ", "1d"))
+    check("refresh: carried bars older than the join window -> the whole series at once", asked == ["10y"] and res[2] == "fresh", str((res, asked)))
+    now_ = time.time(); wall_now = server._wall_fn("America/New_York")(now_)
+    m1 = lambda last: {"tf": "1m", "t": [last - 60, last], "meta": {"tz": "America/New_York"}}
+    check("join window: one-minute bars from the session before cannot be reached by today's window; an hour-old bar can",
+          not snap.can_join(m1(wall_now - 17 * 3600), "1m", now_) and snap.can_join(m1(wall_now - 3600), "1m", now_) and snap.can_join(m1(wall_now - 3 * 86400), "5m", now_) and not snap.can_join(m1(wall_now - 5 * 86400), "5m", now_))
+    # what a refresh reports when the provider does not answer
+    carry_file({**recent(old), "symbol": "ZZQ", "rng": "10y", "full": int(time.time()) - 60, "meta": {"type": "EQUITY"}})
+    def failing(msg):
+        def f(sym, tf, rng=None, tries=4): raise RuntimeError(msg)
+        return f
+    outcomes = {}
+    for label, msg in (("throttled", "HTTP Error 429: Too Many Requests"), ("slow", "The read operation timed out"), ("gone", "No data found, symbol may be delisted"), ("broken", "HTTP Error 500: boom")):
+        bld.yahoo = failing(msg); outcomes[label] = bld.refresh(("ZZQ", "1d"))[2]
+    check("refresh: throttled or timed out -> put off (None); no such symbol -> 'gone'; anything else -> 'error'",
+          outcomes["throttled"] is None and outcomes["slow"] is None and outcomes["gone"].startswith("gone: ") and outcomes["broken"].startswith("error: "), str(outcomes))
+    bld.yahoo = lambda sym, tf, rng=None, tries=4: fresh(rng)
+    saved = (bld.t0, bld.throttled)
+    bld.t0 = time.time() - snap.DEADLINE - 1; late = bld.refresh(("ZZQ", "1d"))[2]
+    bld.t0, bld.throttled = saved[0], snap.THROTTLE_STOP; stopped = bld.refresh(("ZZQ", "1d"))[2]
+    bld.t0, bld.throttled = saved
+    check("refresh: past the deadline or after too many throttled answers nothing new is started", late is None and stopped is None)
+    check("carry: a series the previous build does not have says so", bld.carry(("NOPE", "1d"))[2] == "not in the previous build")
     # a weekly whole fetch that comes back truncated keeps the published history
-    carried = {**pub, "symbol": "ZZQ", "full": int(time.time()) - 30 * 86400, "fetched": int(time.time()) - 3600, "meta": {"type": "EQUITY"}}
-    json.dump(snap.encode_series(carried), open(os.path.join(prevd, "data", "1d", "ZZQ.json"), "w"))
-    bld.yahoo = lambda sym, tf, rng=None, tries=4: {**short, "symbol": "ZZQ", "meta": {"type": "EQUITY"}}
+    carried = {**recent(pub), "symbol": "ZZQ", "full": int(time.time()) - 30 * 86400, "fetched": int(time.time()) - 3600, "meta": {"type": "EQUITY"}}
+    carry_file(carried)
+    bld.yahoo = lambda sym, tf, rng=None, tries=4: {**recent(short), "symbol": "ZZQ", "meta": {"type": "EQUITY"}}
     res = bld.refresh(("ZZQ", "1d"))
-    written = snap.decode_series(snap.read_json_bytes(open(os.path.join(outd, "data", "1d", "ZZQ.json.gz"), "rb").read()))
-    check("refresh: a truncated whole fetch keeps the published history and says so", res[2] == "fresh" and len(written["t"]) == 102 and any("kept the 100 published" in n for n in bld.notes), str((res, len(written["t"]), bld.notes)))
+    check("refresh: a truncated whole fetch keeps the published history and says so", res[2] == "fresh" and len(written()["t"]) == 102 and any("kept the 100 published" in n for n in bld.notes), str((res, len(written()["t"]), bld.notes)))
+    check("files are written whole: no temporary file is left behind", not [f for f in os.listdir(os.path.join(outd, "data", "1d")) if not f.endswith(".json.gz")])
+    # the provider refusing everything: no waiting between tries once the build has seen enough
+    calls = []
+    real_fetch, real_sleep = server._fetch_yahoo, time.sleep
+    def refuse(sym, tf, rng=None): calls.append(sym); raise RuntimeError("HTTP Error 429: Too Many Requests")
+    slept = []
+    server._fetch_yahoo, time.sleep = refuse, lambda s_: slept.append(s_)
+    try:
+        b2 = snap.Build(outd, None, 9, prevd); b2.throttled = snap.THROTTLE_STOP
+        try: b2.yahoo("ZZQ", "1d", "10y", tries=4)
+        except RuntimeError: pass
+        n_stop = (len(calls), len(slept)); calls.clear(); slept.clear()
+        b3 = snap.Build(outd, None, 9, prevd)
+        try: b3.yahoo("ZZQ", "1d", "10y", tries=3)
+        except RuntimeError: pass
+        n_early = (len(calls), len(slept))
+    finally:
+        server._fetch_yahoo, time.sleep = real_fetch, real_sleep
+    check("provider throttling: retried with waits at first, a single try once the build's limit is reached", n_stop == (1, 0) and n_early == (3, 2), str((n_stop, n_early)))
+    # core fallback: a damaged extended-hours file must not cost the one-minute series
+    one_min = {"symbol": "ZZC", "tf": "1m", "t": [1000 * 60 + k * 60 for k in range(40)], "o": [5.0] * 40, "h": [5.0] * 40, "l": [5.0] * 40, "c": [5.0] * 40, "v": [1] * 40, "meta": {"type": "EQUITY", "name": "C"}, "fetched": 5}
+    carry_file(one_min, "1m", "ZZC"); open(os.path.join(prevd, "data", "x1m", "ZZC.json.gz"), "wb").write(b"\x1f\x8bnot gzip at all")
+    b4 = snap.Build(outd, None, 9, prevd); b4.yahoo = failing("HTTP Error 500: boom")
+    r4 = b4.core(("ZZC", "1m"))
+    check("core fallback: the published one-minute series is kept when its extended-hours file cannot be read", r4[2].startswith("kept the published copy") and len(written("1m", "ZZC")["t"]) == 40, str(r4))
     snap.TIER.pop("ZZQ")
+# a series that has been through the published file still joins: dividend payers
+import random
+def payer(n, price, ex_ago, seed, div=0.0045):
+    rnd = random.Random(seed); c = []; p_ = price
+    for _ in range(n): p_ *= 1 + rnd.gauss(0, 0.01); c.append(round(p_, 4 if p_ < 100 else 3))
+    f, a = 1.0, [0.0] * n
+    for i in range(n - 1, -1, -1):
+        a[i] = round(c[i] * f, 6)
+        if i in (n - 1 - ex_ago, n - 1 - ex_ago - 63, n - 1 - ex_ago - 126): f *= 1 - div
+    d = dser(range(DAY0 + 142 - n, DAY0 + 142), c, adj=a, fetched=int(time.time())); d["meta"] = {"type": "EQUITY"}
+    return d
+refused_before, joined_now, spliced_now, restated_seen = 0, 0, 0, 0
+for seed in range(40):
+    full_ = payer(400, (6, 28, 120, 410)[seed % 4], 8, seed)
+    old_ = snap.decode_series(snap.read_json_bytes(snap.series_bytes({k_: (v_[:-1] if k_ in snap.COLS else v_) for k_, v_ in full_.items()})))
+    win = {k_: (v_[-22:] if k_ in snap.COLS else v_) for k_, v_ in full_.items()}
+    adjf = lambda d_, i_: d_["a"][i_] / d_["c"][i_]
+    worst = max(abs(adjf(old_, len(old_["t"]) - 21 + k_) - adjf(win, k_)) for k_ in range(13))
+    refused_before += worst > 1e-6
+    joined_now += snap.join_series(old_, win) is not None
+    spliced_now += snap.splice_truncated(old_, {k_: (v_[-120:] if k_ in snap.COLS else v_) for k_, v_ in full_.items()}) is not None
+    # a dividend declared since: every adjusted close before its ex-date is restated by 0.3%
+    again = {**win, "a": [round(x * (1 - 0.003), 6) if k_ < 18 else x for k_, x in enumerate(win["a"])]}
+    restated_seen += snap.join_series(old_, again) is None
+check("join: a dividend payer's history still joins after going through the published file (the old 1e-6 comparison refused these)", joined_now == 40 and refused_before >= 20, str((joined_now, refused_before)))
+check("truncated answer: the guard works for dividend payers too", spliced_now == 40, str(spliced_now))
+check("join: a dividend declared since (0.3%) still sends the series to a whole fetch", restated_seen == 40, str(restated_seen))
+check("tolerance on the adjustment: what the file format can add, more for low prices", abs(snap.adj_tolerance(150) - (5e-5 + 0.001 / 150)) < 1e-12 and abs(snap.adj_tolerance(6) - (5e-5 + 0.0001 / 6)) < 1e-12 and snap.adj_tolerance(6) > snap.adj_tolerance(150) and snap.adj_tolerance(150) < 1e-4)
+# a rolling one-minute window is not a truncated answer
+thin_old = {"symbol": "TH", "tf": "1m", "t": [DAY0 * 86400 + k * 60 for k in range(60)] + [(DAY0 + d_) * 86400 + k * 60 for d_ in range(1, 5) for k in range(6)], "meta": {}}
+for col in "ohlc": thin_old[col] = [5.0] * len(thin_old["t"])
+thin_old["v"] = [1] * len(thin_old["t"])
+thin_new = {"symbol": "TH", "tf": "1m", "t": [(DAY0 + d_) * 86400 + k * 60 for d_ in range(1, 6) for k in range(6)], "meta": {}}
+for col in "ohlc": thin_new[col] = [5.0] * len(thin_new["t"])
+thin_new["v"] = [1] * len(thin_new["t"])
+# liquid one-minute bars, the provider answering with the last session only: that is cut short, not rolled
+liq_old = {"symbol": "LQ", "tf": "1m", "t": [(DAY0 + d_) * 86400 + 34200 + k * 60 for d_ in range(1, 5) for k in range(390)], "meta": {}}
+for col in "ohlc": liq_old[col] = [5.0] * len(liq_old["t"])
+liq_old["v"] = [1] * len(liq_old["t"])
+liq_new = {k_: (v_[-390:] if k_ in snap.COLS else v_) for k_, v_ in liq_old.items()}
+check("truncated answer: a thin symbol's rolled one-minute window is used as it is; a liquid one cut to its last session keeps the published bars",
+      snap.splice_truncated(thin_old, thin_new) is None and snap.splice_truncated({**thin_old, "tf": "1h"}, {**thin_new, "tf": "1h"}) is not None
+      and len((snap.splice_truncated(liq_old, liq_new) or {"t": []})["t"]) == len(liq_old["t"]))
+# a delisted series with a published copy: asked on its schedule, not every other build
+st2 = {"PUB|1d": 1000}                       # the next build only carried it: write() put the file's fetch time back
+snap.settle_refused(st2, {"PUB|1d": 9000}, [("PUB", "1d")], {}, set(), 9600)
+check("no data from the provider: the 'looked at' time survives the next build's carry", st2["PUB|1d"] == 9000, str(st2))
+# builds further apart than ten minutes do proportionally more, measured from planning to planning
+check("build scale: from the previous build's planning time, between 1 and 3", snap.build_scale(10000, 10000 - 900) == 1.5 and snap.build_scale(10000, 10000 - 300) == 1.0 and snap.build_scale(10000, 10000 - 9000) == 3.0 and snap.build_scale(10000, None) == 1.0)
+# the provider has nothing for a series: asked again on schedule if a copy is published, left alone for a while if not
+st = {"PUB|1d": 111, "OK|1d": 222}
+snap.settle_refused(st, {"DEAD|1d": -5, "ASKED|1d": -6}, [("PUB", "1d"), ("OK", "1d"), ("NEW", "1d"), ("DEAD", "1d"), ("ASKED", "1d")], {("PUB", "1d"): "gone: no data for symbol", ("NEW", "1d"): "gone: no data", ("OK", "1d"): "error: boom"}, {("ASKED", "1d")}, 9000.5)
+check("no data from the provider: a published series is stamped as looked at now; an unpublished one is set aside; old marks are kept unless asked again",
+      st == {"PUB|1d": 9000, "OK|1d": 222, "NEW|1d": -9000, "DEAD|1d": -5}, str(st))
+check("each symbol is planned once (a coin listed twice in the universe is one job)", len(snap.CRYPTO) == len(set(snap.CRYPTO)) and len(snap.EXTENDED) == len(set(snap.EXTENDED)) and len(snap.BROAD) == len(set(snap.BROAD)))
 # published series files are gzip-compressed; builds before that published plain .json
 import gzip
 big = dser(range(100, 2600), [10 + (i % 97) * 0.37 for i in range(2500)], fetched=5)
@@ -424,4 +568,72 @@ with tempfile.TemporaryDirectory() as tdir:
     check("carry: a series cut shorter than before is compressed again, not copied", len(bld.previous_file("1h", "OLDP")[1]["t"]) == 2500)
     for k_ in ("GZA", "OLDP"):
         snap.TIER.pop(k_)
+# ── how the symbol lists are chosen ──
+import liquidity_probe as lp
+names = {
+    "VALE S.A.  American Depositary Shares Each Representing one common share": True,
+    "Itau Unibanco Banco Holding SA American Depositary Shares (Each repstg 500 Preferred shares)": True,
+    "MPLX LP Common Units Representing Limited Partner Interests": True,
+    "Cheniere Energy Partners LP Common Units": True,
+    "AllianceBernstein Holding L.P.  Units": True,
+    "Apple Inc. Common Stock": True,
+    "Huntington Bancshares Incorporated Depositary Shares Each Representing a 1/1000th Interest in a Share of 5.70% Series I Preferred Stock": False,
+    "AGNC Investment Corp. Depositary Shares Each Representing a 1/1000th Interest in a Share of Series E Fixed-to-Floating Preferred Stock": False,
+    "AT&T Inc. 5.350% Global Notes due 2066": False,
+    "Occidental Petroleum Corporation Warrants": False,
+    "Southern Company (The) 2025 Series A Corporate Units": False,
+    "Some Acquisition Corp. Units, each consisting of one share and one warrant": False,
+    "Strategy Inc 10.00% Series A Perpetual Strife Preferred Stock": False,
+    "BHAV Acquisition Corp II Unit": False,
+    "Blue Acquisition Corp. Right ": False,
+    "ADS-TEC ENERGY PLC Warrant": False,
+    "IQM Quantum Computers Oyj Warrants to purchase American Depositary Shares": False,
+}
+wrong = [n for n, want in names.items() if mu.common_stock(n) != want]
+check("stock filter: ADRs and partnership common units are ordinary equity; preferreds, notes, warrants and SPAC or corporate units are not", not wrong, str(wrong))
+check("listed symbols: share classes are written the provider's way", mu.listed_symbol("LEN.B") == "LEN-B" and mu.listed_symbol("BRK/A") == "BRK-A" and mu.listed_symbol(" aapl ") == "AAPL")
+with tempfile.TemporaryDirectory() as tdir:
+    scr, etf = os.path.join(tdir, "s.json"), os.path.join(tdir, "e.json")
+    rows = [{"symbol": "BIGG", "marketCap": "5000000000", "name": "Big Co Common Stock", "sector": "Technology"},
+            {"symbol": "VALE", "marketCap": "40000000000", "name": "VALE S.A.  American Depositary Shares Each Representing one common share", "sector": "Basic Materials"},
+            {"symbol": "LEN.B", "marketCap": "19000000000", "name": "Lennar Corporation Class B", "sector": "Consumer Discretionary"},
+            {"symbol": "MOG.B", "marketCap": "10000000000", "name": "Moog Inc. Class B Common Stock", "sector": "Industrials"},
+            {"symbol": "PREF", "marketCap": "9000000000", "name": "Bank 5.70% Series I Preferred Stock", "sector": "Finance"},
+            {"symbol": "SMLQ", "marketCap": "500000000", "name": "Small Liquid Inc. Common Stock", "sector": "Health Care"},
+            {"symbol": "SMLT", "marketCap": "500000000", "name": "Small Thin Inc. Common Stock", "sector": "Health Care"},
+            {"symbol": "CEFQ", "marketCap": "0", "name": "Closed End Income Fund Common Shares", "sector": ""},
+            {"symbol": "CEFT", "marketCap": "0", "name": "Thin Closed End Fund", "sector": ""},
+            {"symbol": "TINY", "marketCap": "50000000", "name": "Tiny Inc. Common Stock", "sector": ""},
+            {"symbol": "HELD", "marketCap": "900000000000", "name": "Already Listed Inc.", "sector": "Technology"}]
+    json.dump({"data": {"rows": rows}}, open(scr, "w"))
+    json.dump({"data": {"data": {"rows": [{"symbol": "PHYS", "companyName": "Sprott Physical Gold Trust"}, {"symbol": "QETF", "companyName": "Some ETF"}, {"symbol": "THIN", "companyName": "Thin ETF"}, {"symbol": "STKX", "companyName": "Stock on no ETF list"}]}}}, open(etf, "w"))
+    liq_ = {"LEN-B": {"dv": 8e6}, "MOG-B": {"dv": 1.6e4}, "SMLQ": {"dv": 2e6}, "SMLT": {"dv": 2e5}, "CEFQ": {"dv": 9e6, "type": "EQUITY"}, "CEFT": {"dv": 1e4}, "TINY": {"dv": 9e9},
+            "PHYS": {"dv": 1.2e8, "type": "EQUITY"}, "QETF": {"dv": 3e5, "type": "ETF"}, "THIN": {"dv": 1e5, "type": "ETF"}}
+    got = mu.broad_from(scr, {"HELD"}, liq_)
+    check("broad stocks: over $2B, or smaller (or no market cap given: closed-end funds; or a second share class, whatever cap the list shows) and trading enough; ADRs included",
+          sorted(got) == ["BIGG", "CEFQ", "LEN-B", "SMLQ", "VALE"], str(sorted(got)))
+    check("funds: one the provider calls EQUITY is still a fund if it is on the ETF list (PHYS, PSLV)", mu.etfs_from(etf, set(), liq_) == ["PHYS", "QETF"], str(mu.etfs_from(etf, set(), liq_)))
+    cand = mu.candidates(scr, etf, {"HELD"})
+    check("probe candidates: stocks whose place depends on trading (small, or no market cap) and every listed fund; not the big, the held or the preferred",
+          cand["stocks"] == ["CEFQ", "CEFT", "LEN-B", "MOG-B", "SMLQ", "SMLT"] and cand["etfs"] == ["PHYS", "QETF", "STKX", "THIN"], str(cand))
+check("sectors: labels that used to land in the wrong one",
+      [mu.SECTORS[mu.sector_of(x)] if mu.sector_of(x) >= 0 else None for x in ("Finance and Credit Services", "Personal Care, Drug and Grocery Stores", "Energy technology", "Consumer Cyclical", "Consumer Defensive", "Aviation", "Power", "IT Services", "Pharmaceuticals", "Fast Moving Consumer Goods", "Consumer Non-Cyclicals", "Commerce & Industry", "Commerce &amp; Industry", "Properties")]
+      == ["Financials", "Consumer Staples", "Industrials", "Consumer Discretionary", "Consumer Staples", "Industrials", "Utilities", "Information Technology", "Health Care", "Consumer Staples", "Consumer Staples", None, None, "Real Estate"])
+c21, v21 = [10.0] * 22, [100] * 21 + [9999]
+check("liquidity: the 20 finished sessions before the newest bar; shares x price for a stock, the volume itself for a coin (it comes in dollars)",
+      lp.dollar_volume(c21, v21, "EQUITY") == 1000 and lp.dollar_volume([0.000004] * 22, [3e8] * 22, "CRYPTOCURRENCY") == 3e8 and lp.dollar_volume([60000.0] * 22, [20000] * 22, "CRYPTOCURRENCY") == 20000
+      and lp.dollar_volume([10.0], [7], "ETF") == 70 and lp.dollar_volume([], [], "ETF") == 0 and lp.dollar_volume([10.0, None, 10.0], [5, 5, None], "EQUITY") == 50)
+def asker(seq):
+    it = iter(seq)
+    def ask(sym):
+        x = next(it)
+        if isinstance(x, Exception): raise x
+        return x
+    return ask
+herr = lambda code: urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(b""))
+naps = []
+m = lambda seq: lp.measure("S", asker(seq), [0.0], threading.Lock(), sleep=naps.append)
+check("liquidity probe: only an answer is recorded: no such symbol is one; a server error, a throttle or a network failure that persists is not",
+      m([{"dv": 5}]) == {"dv": 5} and m([herr(404)]) == {"dv": 0, "gone": True} and m([herr(502), {"dv": 7}]) == {"dv": 7}
+      and m([herr(502)] * 5) is None and m([herr(429)] * 5) is None and m([OSError("net")] * 5) is None and len(naps) > 5)
 print("all passed" if not fails else f"{fails} FAILED"); sys.exit(1 if fails else 0)

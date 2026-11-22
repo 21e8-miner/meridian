@@ -93,6 +93,10 @@ const fin = (x) => typeof x === 'number' && x === x && Math.abs(x) !== Infinity;
 const r2 = (x) => (fin(x) ? Math.round(x * 100) / 100 : null);
 const sig = (x) => (fin(x) ? Number(x.toPrecision(6)) : null);
 const whole = (x) => (fin(x) ? Math.round(x) : null);
+// Dollar volume, or null when there is no figure: an index, a future, a currency, or a stock in
+// another currency without a rate all come as 0, which is "unknown", not "nothing traded". A
+// blank passes no filter (0 would pass every "at most" one) and shows as a dash.
+const knownDv = (x) => (fin(x) && x > 0 ? Math.round(x) : null);
 const lastOf = (id, b, params, out = 'value') => { const r = calcIndicator(id, b, params); return r && !r.__error && r[out] ? r[out][b.t.length - 1] : NaN; };
 const pctOver = (x, y) => (fin(x) && fin(y) && y > 0 ? (x / y - 1) * 100 : NaN);
 
@@ -100,7 +104,7 @@ const pctOver = (x, y) => (fin(x) && fin(y) && y > 0 ? (x / y - 1) * 100 : NaN);
  * One symbol's screening row from its daily bars (the same 800-bar cut a daily scan reads), in
  * SCREEN_COLS order. Prices as published (not dividend-adjusted), like the Scanner and Markets.
  * `dv`: dollar volume from the shared page's summary, which converts other currencies; without
- * it, the Markets view's own figure (blank for another currency).
+ * it, the Markets view's own figure. Blank (null) when there is none: see knownDv.
  */
 export function screenRow(daily, dv) {
   const b = sliceBars(daily, daily.t.length - 800), n = b.t.length;
@@ -109,7 +113,7 @@ export function screenRow(daily, dv) {
   const v = {
     last: sig(c), chg: r2(pctOver(c, b.c[n - 2])),
     w1: r2(s.chg['1W']), m1: r2(s.chg['1M']), m3: r2(s.chg['3M']), ytd: r2(s.chg.YTD), y1: r2(s.chg['1Y']),
-    vol: whole(b.v[n - 1]), dv: whole(dv != null ? dv : packFromBars(b).dv),
+    vol: whole(b.v[n - 1]), dv: knownDv(dv != null ? dv : packFromBars(b).dv),
     rvol: r2(lastOf('rvol', b, { len: 20 })), rsi: r2(lastOf('rsi', b, { len: 14, src: 'close' })),
     s50: r2(pctOver(c, lastOf('sma', b, { len: 50, src: 'close' }))), s200: r2(pctOver(c, lastOf('sma', b, { len: 200, src: 'close' }))),
     atr: r2((lastOf('atr', b, { len: 14 }) / c) * 100),
@@ -135,16 +139,42 @@ export function localDay(tz, now) {
   return Date.UTC(y, m - 1, d) / 86400000;
 }
 export const isoDay = (day) => new Date(day * 86400000).toISOString().slice(0, 10);
+// Seconds a time zone's wall clock is ahead of UTC at an instant.
+const offFmt = new Map();
+function zoneOffset(tz, utc) {
+  let f = offFmt.get(tz);
+  if (!f) {
+    const opt = { hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' };
+    try { f = new Intl.DateTimeFormat('en-US', { ...opt, timeZone: tz }); } catch { f = new Intl.DateTimeFormat('en-US', { ...opt, timeZone: 'America/New_York' }); }
+    offFmt.set(tz, f);
+  }
+  const p = {}; for (const x of f.formatToParts(new Date(Math.floor(utc) * 1000))) p[x.type] = Number(x.value);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) / 1000 - Math.floor(utc);
+}
+/**
+ * From when is the daily bar dated `day` (days since 1970 on its market's calendar) final? A copy
+ * of the series fetched before that may hold a bar that was still forming, whatever the date says.
+ *   coins and currencies   the end of that day where they are quoted (midnight UTC, or London)
+ *   everything else        half an hour after New York's close on that date (an hour and a half
+ *                          for futures): Asia's and Europe's sessions of the date ended hours before
+ */
+export function finalAfter(day, type, tz) {
+  if (type === 'CRYPTOCURRENCY' || type === 'CURRENCY') { const z = tz || 'UTC', end = (day + 1) * 86400; return end - zoneOffset(z, end); }
+  const local = day * 86400 + (type === 'FUTURE' ? 17.5 : 16.5) * 3600;
+  return local - zoneOffset('America/New_York', local + 5 * 3600);
+}
 
 /**
  * Everything the build publishes for one symbol, from its full daily history:
  *   row     its screening row
  *   ago     preset name -> bars ago of the latest match on one of the newest AGO_DEPTH bars (the
  *           newest may still be forming): what an instant preset scan answers
- *   final   { day, hits }: the presets that matched on its newest finished bar (one dated before
- *           today where the market is), for the daily signals feed
+ *   final   { day, hits }: the presets that matched on its newest finished bar, for the daily
+ *           signals feed. Finished: dated before today where the market is, and (when `fetched`,
+ *           the time this copy was read from the provider, is given) read after that session
+ *           ended: a copy taken mid-session and not refreshed since has a half-day bar.
  */
-export function screenSymbol(daily, { now = Date.now() / 1000, dv } = {}) {
+export function screenSymbol(daily, { now = Date.now() / 1000, dv, fetched } = {}) {
   const n = daily.t.length;
   if (n < 2) return null;
   const out = { row: screenRow(daily, dv), ago: {}, final: null };
@@ -157,9 +187,10 @@ export function screenSymbol(daily, { now = Date.now() / 1000, dv } = {}) {
     return hits;
   };
   out.ago = run(daily);
-  const today = localDay(daily.meta && daily.meta.tz, now);
+  const meta = daily.meta || {}, today = localDay(meta.tz, now);
+  const finished = (i) => { const day = Math.floor(daily.t[i] / 86400); return day < today && (fetched == null || fetched >= finalAfter(day, meta.type, meta.tz)); };
   let k = n - 1;
-  while (k >= 0 && Math.floor(daily.t[k] / 86400) >= today) k--;
+  while (k >= 0 && !finished(k)) k--;
   if (k >= 0) {
     const day = Math.floor(daily.t[k] / 86400);
     const hits = k === n - 1 ? Object.keys(out.ago).filter((name) => out.ago[name] === 0) : Object.entries(run(uptoBars(daily, k + 1))).filter(([, a]) => a === 0).map(([name]) => name);
@@ -180,10 +211,10 @@ export function uptoBars(bars, end) {
  *  Returns { cols, row(sym) -> { k: value } | null, ago(name, sym) -> bars ago | undefined, has(name), generated }. */
 export function mergeScreens(files) {
   const rows = new Map(), presets = new Map(), cols = SCREEN_KEYS;
-  let generated = 0;
+  let generated = 0, oldest = Infinity;
   for (const f of files) {
     if (!f || !f.rows) continue;
-    generated = Math.max(generated, f.generated || 0);
+    generated = Math.max(generated, f.generated || 0); oldest = Math.min(oldest, f.generated || 0);
     const idx = cols.map((k) => (f.cols || []).indexOf(k));
     for (const [s, r] of Object.entries(f.rows)) if (!rows.has(s)) rows.set(s, Object.fromEntries(cols.map((k, i) => [k, idx[i] >= 0 ? r[idx[i]] : null])));
     for (const [name, hits] of Object.entries(f.presets || {})) {
@@ -191,14 +222,15 @@ export function mergeScreens(files) {
       for (const [s, a] of Object.entries(hits)) if (!m.has(s)) m.set(s, a);
     }
   }
-  return { cols, generated, size: rows.size, row: (s) => rows.get(s) || null, ago: (name, s) => { const m = presets.get(name); return m ? m.get(s) : undefined; }, has: (name) => presets.has(name) };
+  // `oldest`: the build time to show for an answer drawn from all of them (the sites build on their own schedules)
+  return { cols, generated, oldest: oldest === Infinity ? 0 : oldest, size: rows.size, row: (s) => rows.get(s) || null, ago: (name, s) => { const m = presets.get(name); return m ? m.get(s) : undefined; }, has: (name) => presets.has(name) };
 }
 
 // ── filters ──
 export const FILTER_OPS = [{ id: 'gte', label: '≥' }, { id: 'lte', label: '≤' }];
-// A filter's value as typed: a number, optionally with K, M or B (10M = 10,000,000). NaN if not one.
+// A filter's value as typed: a number (1500, 1.5e3), optionally with K, M or B (10M = 10,000,000). NaN if not one.
 export function parseAmount(v) {
-  const m = /^\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*([kmb]?)\s*$/i.exec(String(v == null ? '' : v).replace(/[,_$%]/g, ''));
+  const m = /^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)\s*([kmb]?)\s*$/i.exec(String(v == null ? '' : v).replace(/[,_$%]/g, ''));
   return m ? Number(m[1]) * ({ '': 1, k: 1e3, m: 1e6, b: 1e9 }[m[2].toLowerCase()]) : NaN;
 }
 export const validFilters = (fs) => (fs || []).filter((f) => SCREEN_KEYS.includes(f.k) && (f.op === 'gte' || f.op === 'lte') && Number.isFinite(parseAmount(f.v)));
@@ -225,7 +257,7 @@ export function atomFeed(entries, site, cap = 40) {
       const syms = e.presets[k], shown = syms.slice(0, cap);
       return `<h3>${esc(k)} (${syms.length})</h3><p>${shown.map((s) => `<a href="${esc(site)}#/chart/${encodeURIComponent(s)}/1d">${esc(s)}</a>`).join(', ')}${syms.length > cap ? ` and ${syms.length - cap} more` : ''}</p>`;
     }).join('') || '<p>No preset matched on this close.</p>';
-    return `  <entry>\n    <title>${esc(`Signals at the close of ${long(e.date)}: ${total} match${total === 1 ? '' : 'es'}`)}</title>\n    <id>${esc(site)}signals.xml#${e.date}</id>\n    <updated>${iso(e.added)}</updated>\n    <link href="${esc(site)}#/scanner"/>\n    <content type="html">${esc(body)}</content>\n  </entry>`;
+    return `  <entry>\n    <title>${esc(`Signals at the close of ${long(e.date)}: ${total} match${total === 1 ? '' : 'es'}${e.partial ? ' (main site only)' : ''}`)}</title>\n    <id>${esc(site)}signals.xml#${e.date}</id>\n    <updated>${iso(e.updated || e.added)}</updated>\n    <link href="${esc(site)}#/scanner"/>\n    <content type="html">${esc(body)}</content>\n  </entry>`;
   });
-  return `<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom">\n  <title>Meridian daily signals</title>\n  <subtitle>Which symbols each of the Scanner's presets matched at the close, every trading day.</subtitle>\n  <link href="${esc(site)}signals.xml" rel="self"/>\n  <link href="${esc(site)}"/>\n  <id>${esc(site)}signals.xml</id>\n  <updated>${iso(entries.length ? entries[0].added : 0)}</updated>\n  <author><name>Meridian</name></author>\n${items.join('\n')}\n</feed>\n`;
+  return `<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom">\n  <title>Meridian daily signals</title>\n  <subtitle>Which symbols each of the Scanner's presets matched at the close, every trading day.</subtitle>\n  <link href="${esc(site)}signals.xml" rel="self"/>\n  <link href="${esc(site)}"/>\n  <id>${esc(site)}signals.xml</id>\n  <updated>${iso(entries.reduce((m, e) => Math.max(m, e.updated || e.added || 0), 0))}</updated>\n  <author><name>Meridian</name></author>\n${items.join('\n')}\n</feed>\n`;
 }

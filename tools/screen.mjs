@@ -17,9 +17,11 @@ data/signals.json, its entries): a session gets an entry once this site and the 
 have both screened its close. Entries are carried from the previous build (--prev, else --site).
 
 The same functions run in the page, so the instant answers are the ones a scan of the downloaded
-files would give. A symbol that cannot be read is left out and counted; nothing here stops a build.
+files would give. A symbol that cannot be read is left out and counted, and a failure of the
+screening itself only costs the instant answers; the one thing that stops the step is the feed's
+history being unreadable, because an empty feed written over it could not be undone.
 */
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,21 +63,24 @@ export function screenSite(out, now) {
   const rows = {}, presets = Object.fromEntries(Object.keys(PRESETS).map((k) => [k, {}])), finals = [];
   let failed = 0;
   for (const e of cat.symbols) {
-    if (!e.tfs.includes('1d')) continue;
     try {
+      if (!(e.tfs || []).includes('1d')) continue;
       const d = decodeSeries(readSeries(join(data, '1d'), cat.file[e.symbol]));
       const daily = { symbol: e.symbol, tf: '1d', t: d.t, o: d.o, h: d.h, l: d.l, c: d.c, v: d.v, meta: d.meta || {} };
-      const r = screenSymbol(daily, { now, dv: dv[e.symbol] });
+      const r = screenSymbol(daily, { now, dv: dv[e.symbol], fetched: d.fetched });
       if (!r) continue;
       rows[e.symbol] = r.row;
       for (const [name, ago] of Object.entries(r.ago)) presets[name][e.symbol] = ago;
       if (r.final) finals.push({ e, ...r.final });
     } catch (err) { failed++; if (failed <= 5) console.warn(`  ${e.symbol}: ${err.message}`); }
   }
-  // the session the feed reports: the newest finished day of the US stocks here (all symbols when
-  // there are none), and what matched on it
+  // the session the feed reports: the finished day most of the US stocks here are on (all symbols
+  // when there are none; the later day on a tie), and what matched on it. Most, not the newest:
+  // one symbol with a stray bar must not move the session, and a close that only a few symbols
+  // have been refreshed for is not ready to report.
   const us = finals.filter((f) => usStock(f.e)), pool = us.length ? us : finals;
-  const day = pool.length ? Math.max(...pool.map((f) => f.day)) : null;
+  const count = new Map(); for (const f of pool) count.set(f.day, (count.get(f.day) || 0) + 1);
+  const day = pool.length ? [...count].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0] : null;
   const iDv = SCREEN_KEYS.indexOf('dv'), dvOf = (s) => (rows[s] && rows[s][iDv]) || 0;
   const final = { date: day == null ? null : isoDay(day), presets: {} };
   if (day != null) for (const name of Object.keys(PRESETS)) final.presets[name] = finals.filter((f) => f.day === day && f.hits.includes(name)).map((f) => f.e.symbol).sort((a, b) => dvOf(b) - dvOf(a));
@@ -85,45 +90,90 @@ export function screenSite(out, now) {
 
 // The feed's entries after this build: the previous ones, plus the newest session once every
 // site has screened its close. `others` are the other sites' screen files (null: unreadable).
-export function nextEntries(entries, mine, others, now) {
-  const date = mine.final && mine.final.date;
-  if (!date || others.some((o) => !o || !o.final || o.final.date !== date)) return { entries, added: false, waiting: date };
-  if (entries.length && entries[0].date >= date) return { entries, added: false };
-  const all = [mine, ...others], dv = new Map();
-  for (const f of all) { const i = (f.cols || []).indexOf('dv'); for (const [s, r] of Object.entries(f.rows || {})) if (!dv.has(s)) dv.set(s, (i >= 0 && r[i]) || 0); }
-  const presets = {};
+// One session's matches across sites: preset -> symbols, most traded first.
+function mergeFinals(files) {
+  const dv = new Map(), presets = {};
+  for (const f of files) { const i = (f.cols || []).indexOf('dv'); for (const [s, r] of Object.entries(f.rows || {})) if (!dv.has(s)) dv.set(s, (i >= 0 && r[i]) || 0); }
   for (const name of Object.keys(PRESETS)) {
-    const syms = [...new Set(all.flatMap((f) => (f.final.presets || {})[name] || []))].sort((a, b) => (dv.get(b) || 0) - (dv.get(a) || 0));
+    const syms = [...new Set(files.flatMap((f) => ((f.final && f.final.presets) || {})[name] || []))].sort((a, b) => (dv.get(b) || 0) - (dv.get(a) || 0));
     if (syms.length) presets[name] = syms;
   }
-  return { entries: [{ date, added: Math.floor(now), presets }, ...entries].slice(0, KEEP_ENTRIES), added: true };
+  return presets;
+}
+
+/**
+ * The feed's entries after this build. `others`: the other sites' screen files (null: unreadable).
+ * `pending`: the session this site was waiting on the others for, with what it had itself.
+ *   - a session is added once every site has screened its close;
+ *   - while that session is still the newest one, its entry follows the data (a series refreshed
+ *     late), keeping its place and its "added" time;
+ *   - a session the sites never agreed on within its day is added from this site alone, marked
+ *     partial, when the next one arrives: one entry per session, none silently skipped.
+ * Returns { entries, added, waiting, pending }.
+ */
+export function nextEntries(entries, mine, others, now, pending = null) {
+  const date = mine.final && mine.final.date, t = Math.floor(now);
+  let out = entries;
+  if (pending && pending.date && date && pending.date < date && !out.some((e) => e.date === pending.date) && (!out.length || out[0].date < pending.date)) {
+    out = [{ date: pending.date, added: t, presets: pending.presets || {}, partial: true }, ...out];
+  }
+  if (!date) return { entries: out, added: false, pending: null };
+  if (others.some((o) => !o || !o.final || o.final.date !== date)) {
+    const waitFor = out.length && out[0].date >= date ? null : { date, presets: mergeFinals([mine]) };
+    return { entries: out.slice(0, KEEP_ENTRIES), added: false, waiting: waitFor ? date : undefined, pending: waitFor };
+  }
+  const presets = mergeFinals([mine, ...others]);
+  if (out.length && out[0].date === date) {
+    if (JSON.stringify(out[0].presets) !== JSON.stringify(presets)) { const { partial, ...rest } = out[0]; out = [{ ...rest, presets, updated: t }, ...out.slice(1)]; }
+    return { entries: out, added: false, pending: null };
+  }
+  if (out.length && out[0].date > date) return { entries: out, added: false, pending: null };
+  return { entries: [{ date, added: t, presets }, ...out].slice(0, KEEP_ENTRIES), added: true, pending: null };
+}
+
+// The feed as the previous build left it: { entries, pending }. From the previous build's files
+// when there are any, else from the published site. No feed yet (404) is an empty one; a site that
+// cannot be read is an error, because writing an empty feed over it would lose the history.
+export async function loadSignals(o, get = fetchJson) {
+  const local = o.prev ? tryJson(join(o.prev, 'data', 'signals.json')) : null;
+  if (local) return local;
+  if (!o.site) return { entries: [] };
+  let err = null;
+  for (let k = 0; k < 3; k++) {
+    try { return await get(`${o.site}data/signals.json?b=${Math.floor(o.now)}-${k}`); }
+    catch (e) { if (/HTTP 404/.test(e.message)) return { entries: [] }; err = e; }
+  }
+  throw new Error(`the signals feed's history could not be read (${err && err.message}); not replacing it`);
 }
 
 async function main() {
   const o = parseArgs(process.argv.slice(2)), t0 = performance.now();
-  const { screen, failed, n } = screenSite(o.out, o.now);
-  writeFileSync(join(o.out, 'data', 'screen.json'), JSON.stringify(screen));
-  const hits = Object.entries(screen.presets).map(([k, v]) => `${Object.values(v).filter((a) => a === 0).length} ${k.split(/[ —,(]/)[0].toLowerCase()}`);
-  console.log(`screen: ${n} symbols in ${((performance.now() - t0) / 1000).toFixed(0)} s${failed ? `, ${failed} unreadable` : ''}; matching now: ${hits.join(', ')}; last finished session ${screen.final.date}`);
+  // Screening must not stop the data from being published: if it fails the page downloads files
+  // to scan, as it did before, and the feed is carried as it was.
+  let screen = null;
+  try {
+    const r = screenSite(o.out, o.now);
+    screen = r.screen;
+    writeFileSync(join(o.out, 'data', 'screen.json'), JSON.stringify(screen));
+    const hits = Object.entries(screen.presets).map(([k, v]) => `${Object.values(v).filter((a) => a === 0).length} ${k.split(/[ —,(]/)[0].toLowerCase()}`);
+    console.log(`screen: ${r.n} symbols in ${((performance.now() - t0) / 1000).toFixed(0)} s${r.failed ? `, ${r.failed} unreadable` : ''}; matching now: ${hits.join(', ')}; last finished session ${screen.final.date}`);
+  } catch (e) { console.log(`::warning::screening failed: ${e.stack || e}`); }
   if (o.part === 'broad') return;
   // the daily signals feed
-  let prev = o.prev ? tryJson(join(o.prev, 'data', 'signals.json')) : null;
-  if (!prev && o.site) { try { prev = await fetchJson(`${o.site}data/signals.json?b=${Math.floor(o.now)}`); } catch { prev = null; } }
-  const others = [];
-  if (o.part === 'main' && o.shard) { try { others.push(await fetchJson(`${o.shard}data/screen.json?b=${Math.floor(o.now)}`)); } catch (e) { console.warn(`  data site screen unreadable: ${e.message}`); others.push(null); } }
-  const r = nextEntries((prev && prev.entries) || [], screen, others, o.now);
-  writeFileSync(join(o.out, 'data', 'signals.json'), JSON.stringify({ entries: r.entries }));
+  const carried = await loadSignals(o);
+  let r = { entries: carried.entries || [], pending: carried.pending || null, added: false };
+  if (screen) {
+    const others = [];
+    if (o.part === 'main' && o.shard) { try { others.push(await fetchJson(`${o.shard}data/screen.json?b=${Math.floor(o.now)}`)); } catch (e) { console.warn(`  data site screen unreadable: ${e.message}`); others.push(null); } }
+    r = nextEntries(r.entries, screen, others, o.now, r.pending);
+  }
+  writeFileSync(join(o.out, 'data', 'signals.json'), JSON.stringify({ entries: r.entries, pending: r.pending || null }));
   writeFileSync(join(o.out, 'signals.xml'), atomFeed(r.entries, o.site || ''));
   console.log(`signals feed: ${r.entries.length} sessions${r.added ? `, added ${r.entries[0].date}` : r.waiting ? `; ${r.waiting} waits for the data site` : ''}`);
 }
 
-// A failure here must not stop the data from being published: the page then downloads files to
-// scan, as it did before. The feed's entries are carried forward so its history is not lost.
+// Only the feed's history being unreadable stops the step (and with it this build): publishing
+// an empty feed over it could not be undone; the next build tries again.
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  main().catch((e) => {
-    console.log(`::warning::screening failed: ${e.stack || e}`);
-    const o = parseArgs(process.argv.slice(2));
-    for (const f of ['data/signals.json', 'signals.xml']) { try { if (o.prev && existsSync(join(o.prev, f))) copyFileSync(join(o.prev, f), join(o.out, f)); } catch { /* nothing to carry */ } }
-    process.exit(0);
-  });
+  main().catch((e) => { console.log(`::error::${e.message || e}`); process.exit(1); });
 }

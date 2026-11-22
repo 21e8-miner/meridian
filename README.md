@@ -6,9 +6,9 @@ a small model lab and seasonality tables. One Python file serves it; the front e
 step and no dependencies.
 
 **Shared page:** https://21e8-miner.github.io/meridian/ — runs in the browser with no install, on
-about 6,100 symbols (every US stock over $2B and the liquid smaller ones, the S&P 500 with sectors,
-about 2,100 ETFs, 940 stocks from 13 world indexes, 120 cryptocurrencies, futures,
-world indexes, currencies, crypto) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
+about 9,100 symbols (every US stock over $2B and the liquid smaller ones, ADRs and partnerships
+included, the S&P 500 with sectors, about 4,400 ETFs and other funds, 940 stocks from 13 world
+indexes, 152 cryptocurrencies, futures, world indexes, currencies) plus Hyperliquid's live markets. Run it locally (below) to chart any symbol.
 
 ## Run
 
@@ -39,7 +39,7 @@ npm test
 | **Charts** | Candles, hollow, Heikin-Ashi, OHLC bars, line, area. 1m to monthly; intraday charts of an open market refresh every 15 seconds. Log scale, volume, volume-by-price. 1, 2 or 4 charts side by side. 66 built-in indicators, each of which can be computed on a higher timeframe and overlaid. Right-click a bar to anchor a VWAP there. Optional dividend-adjusted prices. Drawing tools: trendline, ray, horizontal line, rectangle, Fibonacci, note, measure; points snap to the nearest open/high/low/close (hold Alt for free placement). Drawings are saved per symbol. Crosshairs are linked across charts; drag the price axis to zoom it, arrow keys pan. |
 | **Markets** | A whole list at once: heat map grouped by sector (color = change over 1 day to 1 year, area = dollar volume or equal), advancers and decliners, share above the 50- and 200-day averages, 52-week closing highs and lows, a table per sector, strongest and weakest. Click a tile to open its chart, a sector to zoom into it. |
 | **Auto analysis** | Trendlines through swing pivots (with touch counts and break detection), support / resistance zones, Fibonacci retracement of the dominant swing, 20 candlestick patterns, chart patterns (double top / bottom, head & shoulders, triangles, wedges, channels, rectangle), open gaps. A side panel lists what was found plus a multi-timeframe trend table. |
-| **Scanner** | Filters on daily values (change over 1 day to 1 year, dollar and relative volume, RSI, distance from the 50 and 200 SMA and the 52-week range, ATR, gap), then conditions built by pointing and clicking or typed as text (`close > sma(200) and rsi(14) < 30 @1w`): indicator vs indicator or value, crosses, candlestick patterns, auto-analysis signals, each on its own timeframe. Built-in lists or any watchlist. Ten presets. Results save to a watchlist or CSV. On the shared page the filters and the presets run on all 8,834 symbols at once (below). |
+| **Scanner** | Filters on daily values (change over 1 day to 1 year, dollar and relative volume, RSI, distance from the 50 and 200 SMA and the 52-week range, ATR, gap), then conditions built by pointing and clicking or typed as text (`close > sma(200) and rsi(14) < 30 @1w`): indicator vs indicator or value, crosses, candlestick patterns, auto-analysis signals, each on its own timeframe. Built-in lists or any watchlist. Ten presets. Results save to a watchlist or CSV. On the shared page the filters and the presets run on every symbol at once (below). |
 | **Strategy Tester** | Entry and exit rules from the same builder, long or short, stop / target / trailing stop / time exit, fees and slippage. Report with equity vs buy & hold, drawdown, a year-by-year table, trade list (CSV export), trades drawn on the chart. Dividends included by default. **Sweep a setting** runs a range of values for any number in the strategy and shows in-sample next to out-of-sample. Runs one symbol or a whole list. |
 | **Alerts & Bots** | Price-level alerts, alerts on a line you drew (right-click the chart), multi-factor rule alerts. Paper bots track a tested strategy forward from the moment of deployment. |
 | **Indicator Studio** | Write indicators in JavaScript. Saved scripts work on charts and inside scan, strategy and alert conditions. |
@@ -132,24 +132,25 @@ only. Backtests, the model lab and seasonality always read exchange bars only.
 ## The shared page
 
 `tools/snapshot.py` builds a static copy of the app: `web/` plus recent exchange history. A GitHub
-Actions job (`.github/workflows/pages.yml`) rebuilds and publishes it about every ten minutes
-while US stocks are printing (weekdays 04:00–20:00 New York) and every half hour otherwise.
+Actions job (`.github/workflows/pages.yml`) rebuilds and publishes it about every quarter of an
+hour while US stocks are printing (weekdays 04:00–20:00 New York: a run takes a few minutes, then
+waits seven and a half before booking the next) and every half hour otherwise.
 GitHub's own scheduler starts runs late or not at all when it is busy, so each run books the next
 one itself and the schedule only restarts that chain if it stops; disabling the workflow stops
 it. A
 static page cannot fetch the exchange feed itself, so between builds the page keeps itself current
 in the browser: it reads Hyperliquid directly and applies the same projection as the server
-(`web/js/static.js`, a port of the server code that `tests/parity.mjs` checks against it on 6,300
-shared cases).
+(`web/js/static.js`, a port of the server code that `tests/parity.mjs` checks against it on about
+22,500 shared cases, market hours included).
 
-The data set has two tiers, so it can be wide without flooding the provider with requests:
+The data set has four tiers, so it can be wide without flooding the provider with requests:
 
 | Tier | Symbols | History | Refreshed |
 | --- | --- | --- | --- |
-| Core | 184: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 20 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
-| Extended | 1,073: the rest of the S&P 500 and other followed stocks, with sectors; every ETF that trades at least $50M a day (VGT, VYM, ...); about 100 more chosen funds; and every WisdomTree, Cambria and Alpha Architect fund (`web/universe.json`) | 1-minute (about four sessions), 5-minute (about four weeks; 15m and 30m are built from it), hourly (about 10 months), 10 years daily | on a rolling basis: 1- and 5-minute bars within about 30 minutes, daily and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
-| Crypto | 102: the largest coins by market cap (CoinGecko) that trade at least $1M a day, each matched to the Yahoo ticker with the same price (several coins share a symbol) | 1-minute (about a day), 5-minute, hourly, daily | like extended, but around the clock: crypto never closes |
-| Broad | 7,477: every other US-listed common stock over $2B market cap; smaller ones (from $200M) that trade at least $1M a day; every other US ETF that trades at least $250K a day, and every fund of 34 issuers (Vanguard, iShares, SPDR, Schwab, Invesco, First Trust, ProShares, Direxion, Global X, ARK, JPMorgan, Dimensional, Fidelity, Avantis, VanEck, ...) that trades at all; and the members of 13 world indexes (FTSE 100, DAX 40, CAC 40, AEX, IBEX 35, FTSE MIB, SMI, OMX Stockholm 30, Nikkei 225, Hang Seng, S&P/TSX 60, S&P/ASX 200, NIFTY 50) from their Wikipedia articles. Each issuer and each index has a list of its own in the Scanner and Markets (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | 1-minute (about four sessions), 5-minute (about two weeks; 15m and 30m are built from it), hourly (about 8 months), 10 years daily; the daily, 5- and 1-minute history on a site of its own (below) | 1- and 5-minute within about an hour, daily within about 90 minutes, hourly within about two hours while the market is open |
+| Core | 184: everything with a live proxy; grains, meats, softs, metals, energy, currency and crypto futures; US and world indexes; 16 currency pairs; 20 cryptocurrencies; the main ETFs; mega caps | 1m, 5m (15m and 30m are built from it), hourly, 10 years daily | every build |
+| Extended | 1,075: the rest of the S&P 500 and other followed stocks, with sectors; every ETF or listed trust that trades at least $50M a day (VGT, VYM, PHYS, ...); about 100 more chosen funds; and every WisdomTree, Cambria and Alpha Architect fund (`web/universe.json`) | 1-minute (about four sessions), 5-minute (about four weeks; 15m and 30m are built from it), hourly (about 10 months), 10 years daily | on a rolling basis: 1- and 5-minute bars within about 30 minutes, daily and hourly within about an hour while the market is open, once more after the close, not at all overnight or at weekends |
+| Crypto | 132 more coins (152 with the core's): the largest by market cap (CoinGecko) that trade at least $1M a day by the provider's own dollar volume, each matched to the Yahoo ticker with the same price (several coins share a symbol; a ticker is listed once) | 1-minute (about a day), 5-minute, hourly, daily | like extended, but around the clock: crypto never closes |
+| Broad | 7,706: every other US-listed common stock over $2B market cap, American depositary shares and partnership units included (preferreds, notes, warrants and SPAC units are not); smaller ones (from $200M, or with no market cap on the list, as closed-end funds have, or a second share class such as LEN-B) that trade at least $1M a day; every other US ETF or listed trust that trades at least $250K a day, and every fund of 34 issuers (Vanguard, iShares, SPDR, Schwab, Invesco, First Trust, ProShares, Direxion, Global X, ARK, JPMorgan, Dimensional, Fidelity, Avantis, VanEck, ...) that trades at all; and the members of 13 world indexes (FTSE 100, DAX 40, CAC 40, AEX, IBEX 35, FTSE MIB, SMI, OMX Stockholm 30, Nikkei 225, Hang Seng, S&P/TSX 60, S&P/ASX 200, NIFTY 50) from their Wikipedia articles. Each issuer and each index has a list of its own in the Scanner and Markets (sectors for stocks are Nasdaq's, mapped onto the GICS names, so rougher) | 1-minute (about four sessions), 5-minute (about two weeks; 15m and 30m are built from it), hourly (about 8 months), 10 years daily; the daily, 5- and 1-minute history on a site of its own (below) | 1- and 5-minute within about an hour, daily within about 90 minutes, hourly within about two hours while the market is open |
 
 Every refresh asks for the last few bars only and joins them onto the carried history; if the two
 disagree on any shared bar (a split or dividend restated the history), the history is a week old,
@@ -166,7 +167,9 @@ published separately, at https://21e8-miner.github.io/meridian-data/ (repository
 built by the same `tools/snapshot.py --part=broad`; its workflow is kept here as
 `data-site/pages.yml`); its hourly history is on the main site. The main site's catalog names the
 data site as a shard and the page merges the two, taking each timeframe of a symbol from whichever
-site has it; if the data site cannot be read, what is on it is left out and everything else works.
+site has it; if the data site cannot be read, what is on it is left out and everything else works
+(the page says so instead of claiming the symbol has no such history). Each site starts a build
+from its own previous build and, failing that, from its own published copy, never the other's.
 More shards can be added the same way, and a build that would publish more than a site may hold
 stops instead. Files are published in a compact form (bar times as gaps in the largest step that
 divides them, the dividend adjustment as runs of a factor), about 30% smaller than plain columns,
@@ -176,7 +179,9 @@ gives each site about three times the room. The page inflates them itself (the b
 unchanged file's bytes rather than compressing it again, so only refreshed series cost time.
 
 Foreign stocks are priced in their own currency; the Markets view converts their dollar volume
-with the core currency pairs. World markets are refreshed on the US schedule, so a market that
+with the core currency pairs. Whether a world market is open is told by its own hours (Tokyo,
+Hong Kong, London, the euro-area exchanges, Stockholm, Zurich, Sydney, Mumbai, Toronto, Seoul;
+lunch breaks count as open and holidays are not known). World markets are refreshed on the US schedule, so a market that
 has closed has its final bar within the day. Script and stylesheet addresses carry a build
 version, so a browser never runs a mix of two builds' code.
 
@@ -184,8 +189,7 @@ What differs from running locally: only the listed symbols have history (plus an
 market); symbols outside the core keep about four sessions of one-minute bars (broad ones two weeks of
 five-minute bars) and have no live estimate; a scan with
 conditions other than an unchanged preset downloads about 0.13 MB per symbol that passes its
-filters, the first time; 1-minute
-history is about a day deep; and exchange prints are as old as that series' last refresh (the
+filters, the first time; and exchange prints are as old as that series' last refresh (the
 status line says how old) with estimates bridging to now where a proxy exists. The Markets view
 reads a year of daily closes per symbol from one file for the core and extended lists, and a
 second, larger one only when a list includes broad symbols.
@@ -194,7 +198,7 @@ second, larger one only when a list includes broad symbols.
 of history, so each build answers the common questions in advance: after the snapshot,
 `tools/screen.mjs` runs the page's own code (`web/js/screen.js`, the same indicators and rule
 evaluator) over every daily file the site publishes and writes `data/screen.json`, about 1 MB for
-all 8,834 symbols across both sites: each symbol's filter values, and for every preset how many
+every shared symbol across both sites: each symbol's filter values, and for every preset how many
 bars ago it last matched (the newest ten bars). The Scanner answers filters, and an unchanged
 preset on the daily timeframe, from those files in a fraction of a second; other conditions are
 scanned from downloaded history, for the symbols that passed the filters only. `tests/screen.mjs`
@@ -203,8 +207,12 @@ symbols for every preset (no differences).
 
 **Daily signals feed.** The main site's build also keeps `signals.xml`, an Atom feed with one entry
 per US session: what each preset matched at that close, across both sites, most traded first.
-A session is added once both sites have screened its finished bars (its day must be over where
-each market is), so it appears shortly after midnight New York time. Subscribe in any feed reader:
+A bar counts as that session's only if its day is over where the market is and the copy was read
+from the provider after the session ended (a series last refreshed mid-session is left out rather
+than reported from a half-day bar). The session is the one most US stocks are on, and it is added
+once both sites have screened it, shortly after midnight New York time; while it is the newest
+entry it follows series that were refreshed late. If the two sites never agree on a session within
+its day, it is added from the main site alone and marked so. Subscribe in any feed reader:
 https://21e8-miner.github.io/meridian/signals.xml
 
 **Tests gate publishing.** Both workflows run `npm test` before building; a commit that fails them
@@ -230,7 +238,7 @@ Then open http://localhost:9090. What is measured:
 
 | Metric | What it says |
 | --- | --- |
-| `meridian_upstream_requests_total{provider, outcome}` and `_duration_seconds` | every request to Yahoo and Hyperliquid: ok, throttled, http_error, timeout, network_error; and how long it took |
+| `meridian_upstream_requests_total{provider, outcome}` and `_duration_seconds` | every request to Yahoo and Hyperliquid: ok, no_data (the provider's own "no such symbol" / "outside my window" answers), throttled, http_error, timeout, network_error; and how long it took |
 | `meridian_cache_lookups_total{result}` | where each series came from: memory, disk, fetched, stale (provider failed, last good copy served), error |
 | `meridian_live_fill_total{outcome}` | live estimates put on a response: fill (delayed futures), ext (stocks outside regular hours), none, error |
 | `meridian_live_anchor_age_seconds{symbol}` | how old the newest real exchange print was when a live estimate was last built (proxied symbols, last 10 minutes) |
@@ -267,6 +275,10 @@ only `or`.
   back 7 days for 1-minute bars, 60 days for 5–30 minute bars and about two years for hourly bars.
   US-listed stocks, ETFs, indexes, futures, currencies and crypto pairs work; there are no options,
   fundamentals, filings or news.
+- A bar whose close is zero or negative is left out for every instrument (crude oil's negative
+  settlement of 20 April 2020 is not in the history): returns, log scales and ratios cannot use
+  it. Opens, highs and lows at or below zero are kept for futures, rates and indexes; a zero
+  open, high or low on a stock, fund or coin is the provider's blank and is filled from the bar.
 - **Alerts and bots run in the browser tab.** Close the tab and they stop. Nothing is sent to a broker.
 - Everything you save (layouts, watchlists, drawings, rules, scripts, models) lives in this browser's
   local storage. Use the backup button to keep a copy or move it.
@@ -284,7 +296,7 @@ metrics.py           Prometheus metrics registry and text format    monitoring/ 
 web/js/static.js     data backend for the shared page: snapshot + live fill in the browser
 web/js/markets.js    Markets view: breadth, heat map, sector table, movers
 web/universe.json    stock list with sectors (written by tools/make_universe.py)
-tools/snapshot.py    builds the shared site (three tiers, rolling refresh)
+tools/snapshot.py    builds the shared site (four tiers, rolling refresh)
 tools/screen.mjs     screens every symbol a built site publishes; the daily signals feed
 web/js/screen.js     screening row, presets, instant answers (page and build share it)
 web/js/conditions.js rule model, evaluator and builder UI      web/js/formula.js  rules as text

@@ -115,16 +115,18 @@ const money = (v) => (v >= 1e9 ? `$${(v / 1e9).toFixed(1)}B` : v >= 1e6 ? `$${(v
 let mixed = false;
 const groupOf = (r) => (mixed && r.mkt ? r.mkt : r.sector || r.mkt || TYPE_GROUP[r.type] || 'Other');
 
+let builtKey = null, partial = false;
 async function load() {
   const my = ++loadSeq, syms = lists[cfg.list] || [], be = await backend(), ix = be.info();
-  let stamp = 0;
+  let stamp = 0, nextKey = null;
   const { sectors, stocks } = await stockSectors();
   const out = [];
   if (ix) {
     const pk = await be.pack(syms.some((s) => { const e = ix.by.get(s); return e && e.tier === 3; }));
     if (my !== loadSeq) return;
-    if (pk.generated === built && loadedFor === cfg.list) return; // nothing new since the last look
-    stamp = pk.generated;
+    const key = pk.key ?? pk.generated; // every site the rows came from (a data site rebuilds on its own)
+    if (key === builtKey && loadedFor === cfg.list) return; // nothing new since the last look
+    stamp = pk.generated; nextKey = key; partial = !!pk.partial;
     for (const sym of syms) {
       const row = pk.s[sym], e = ix.by.get(sym); if (!row || !e) continue;
       const p = decodePack(row);
@@ -140,7 +142,7 @@ async function load() {
     }
   }
   if (my !== loadSeq) return; // a newer request owns the view; this one must leave no trace
-  built = stamp;
+  built = stamp; builtKey = nextKey;
   // A symbol whose newest bar is older than its kind's newest (in the same market: Tokyo's day
   // starts before New York's) has not been read since the session changed (the wider list is
   // refreshed in turns). Its "1 day" change is yesterday's: say so instead of mixing sessions.
@@ -155,6 +157,7 @@ async function load() {
     : `Exchange quotes as of ${clock(built)}; the feed runs up to 15 minutes late.`;
   const behind = rows.filter((r) => r.old).length;
   if (behind) note += ` ${behind} ${behind === 1 ? 'symbol has' : 'symbols have'} no bar for the newest session yet: gray on the 1-day view.`;
+  if (shared && partial) note += ' Part of this list is on a second data site that could not be read just now; its symbols appear when it answers.';
   draw();
 }
 

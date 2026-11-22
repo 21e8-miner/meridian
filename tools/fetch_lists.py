@@ -46,7 +46,7 @@ INDEXES = {
 }  # (the English Ibovespa article lists no members; Brazil's large companies trade in the US as ADRs)
 TICKER_COL = re.compile(r"^(ticker|symbol|code|epic|stock code|ticker symbol|tickersymbol|securities code|ticker\s*\(.*\))", re.I)
 NAME_COL = re.compile(r"^(company|name|constituent|company name|stock|issuer)", re.I)
-SECTOR_COL = re.compile(r"(sector|industry|classification)", re.I)
+SECTOR_COL = re.compile(r"(sector|industry|classification|sub-?index)", re.I)  # Hang Seng's table calls it "Sub-index"
 
 
 class Tables(HTMLParser):
@@ -210,7 +210,7 @@ def fetch_intl(outdir: str):
 
 # stablecoins, wrapped and staked copies of other coins: they add nothing to chart
 NOT_A_COIN = re.compile(r"(usd|eur|gold|wrapped|staked|bridged|liquid staking|restaked|tokenized|wbtc|weth|steth|cbbtc|bitcoin bep2|tether|stable|dollar)", re.I)
-STABLE = {"USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "USDS", "PYUSD", "USD1", "RLUSD", "BUSD", "USDD", "USDX", "FRAX", "USDP", "GUSD", "LUSD", "USDB", "USDY", "USDF", "USDG", "USDTB", "BUIDL", "USYC", "XAUT", "PAXG", "EURC", "SUSDS", "SUSDE", "USD0", "USR", "DEUSD", "USTB", "OUSG", "USDO", "BFUSD", "USDAI", "SYRUPUSDC", "SYRUPUSDT"}
+STABLE = {"USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "USDS", "PYUSD", "USD1", "RLUSD", "BUSD", "USDD", "USDX", "FRAX", "USDP", "GUSD", "LUSD", "USDB", "USDY", "USDF", "USDG", "USDTB", "BUIDL", "USYC", "XAUT", "PAXG", "EURC", "SUSDS", "SUSDE", "USD0", "USR", "DEUSD", "USTB", "OUSG", "USDO", "BFUSD", "USDAI", "SYRUPUSDC", "SYRUPUSDT", "GHO", "YLDS", "USAT", "USX"}
 
 
 def fetch_crypto(outdir: str, n: int = 250):
@@ -228,13 +228,19 @@ def fetch_crypto(outdir: str, n: int = 250):
             continue
         out.append({"symbol": sym, "name": name, "id": r.get("id"), "price": r.get("current_price"), "cap": r.get("market_cap"), "volume": r.get("total_volume")})
     matched = 0
-    known = {}
+    known, taken = {}, set()
     path = os.path.join(outdir, "crypto.json")
     if os.path.exists(path):
         with open(path) as f:
             known = {c["id"]: c.get("yahoo") for c in json.load(f) if c.get("yahoo")}
     for c in out:
         c["yahoo"] = known.get(c["id"]) or match_yahoo(c)  # a match from an earlier run is kept
+        # Two coins can share a symbol and a price close enough to pass (a token and its wrapped or
+        # renamed twin): the list is largest first, so the first one keeps the ticker.
+        if c["yahoo"] in taken:
+            c["yahoo"] = None
+        elif c["yahoo"]:
+            taken.add(c["yahoo"])
         matched += bool(c["yahoo"])
         time.sleep(0.3)
     with open(os.path.join(outdir, "crypto.json"), "w") as f:

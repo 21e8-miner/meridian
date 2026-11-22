@@ -86,7 +86,7 @@ CORE = sorted(set(
 ))
 EXTENDED = sorted((set(UNIVERSE["stocks"]) | set(UNIVERSE.get("etfs") or [])) - set(CORE))
 # coins: daily and hourly like the extended tier, but refreshed around the clock
-CRYPTO = [s for s in (UNIVERSE.get("crypto") or []) if s not in set(CORE) | set(EXTENDED)]
+CRYPTO = list(dict.fromkeys(s for s in (UNIVERSE.get("crypto") or []) if s not in set(CORE) | set(EXTENDED)))  # each once
 # international index members: daily history, grouped by index
 MKT_OF = {s: name for name, v in (UNIVERSE.get("intl") or {}).items() for s in v["members"]}
 BROAD = sorted((set(UNIVERSE.get("broad") or {}) | set(MKT_OF)) - set(CORE) - set(EXTENDED) - set(CRYPTO))
@@ -106,11 +106,12 @@ EXT_BUDGET = 1200       # extended refreshes per build, beyond series the site d
 BROAD_KEEP = {"1d": 2520, "1h": 1200, "5m": 780, "1m": 1500}  # ten years of days, eight months of hours, two weeks of 5m, four sessions of 1m
 BROAD_RANGE = {"1d": "10y", "1h": "1y", "5m": "1mo", "1m": "5d"}
 BROAD_TARGET = {"1d": 90 * 60, "1h": 120 * 60, "5m": 60 * 60, "1m": 60 * 60}  # the least traded and the biggest tier: refreshed less often
-BROAD_BUDGET = 1000    # broad refreshes per build and timeframe (each is a small request: the last few bars)
+BROAD_BUDGET = 1200    # broad refreshes per ten minutes and timeframe (each is a small request: the last few bars)
 # Which of the broad tier's timeframes each part of a split data set publishes (see --part)
 BROAD_PART = {"all": ("1d", "1h", "5m", "1m"), "main": ("1h",), "broad": ("1d", "5m", "1m")}
 # how much a refresh asks for, to join onto the carried history
 JOIN_RANGE = {"1d": "1mo", "1h": "5d", "5m": "5d", "1m": "1d"}
+JOIN_SPAN = {"1mo": 28 * 86400, "5d": 4 * 86400, "1d": 16 * 3600}  # how far back each window is sure to reach
 CRYPTO_BUDGET = 200    # coin refreshes per build
 # currency -> its value in US dollars, from these core pairs (True: the pair is quoted as USD per unit)
 FX_PAIRS = {"EUR": ("EURUSD=X", True), "GBP": ("GBPUSD=X", True), "AUD": ("AUDUSD=X", True), "NZD": ("NZDUSD=X", True),
@@ -187,7 +188,13 @@ def join_series(old: dict, new: dict, need: int = 3) -> dict | None:
     agree on the bars both have (a split or a dividend has restated the history since: fetch it
     whole). Compared: the close and the dividend adjustment (adjusted / close) on every shared bar
     but each side's newest, which may still have been forming. At least three such bars are needed.
-    Any timeframe: intraday series have no adjusted close, so only their closes are compared."""
+    Any timeframe: intraday series have no adjusted close, so only their closes are compared.
+
+    The carried side has been through the published file, where the adjusted close is rebuilt from
+    factor runs and rounded (encode_series), so its adjustment is only as exact as adj_tolerance()
+    says. Comparing more tightly than that refused every join for a month after each ex-dividend
+    date, and made splice_truncated() useless for dividend payers. A restatement smaller than the
+    tolerance (a dividend of a few thousandths of a percent) is picked up by the weekly whole fetch."""
     if not old.get("t") or not new.get("t"):
         return None
     at = {t: i for i, t in enumerate(old["t"])}
@@ -198,7 +205,7 @@ def join_series(old: dict, new: dict, need: int = 3) -> dict | None:
         if i is None or i == len(old["t"]) - 1:
             continue
         a, b = old["c"][i], new["c"][j]
-        if abs(a - b) > 1e-6 * max(1.0, abs(b)) or abs(adj(old, i) - adj(new, j)) > 1e-6:
+        if abs(a - b) > 1e-6 * max(1.0, abs(b)) or abs(adj(old, i) - adj(new, j)) > adj_tolerance(old["a"][i] if old.get("a") else a) * max(1.0, abs(adj(new, j))):
             return None
         shared += 1
     if shared < need:
@@ -219,7 +226,20 @@ def join_series(old: dict, new: dict, need: int = 3) -> dict | None:
 
 
 
+def adj_tolerance(a: float) -> float:
+    """How far adjusted / close can be off, relatively, after a series has been through the
+    published file: the factor runs allow AF_TOL, and decoding rounds the adjusted close like
+    server._round (3 decimals from 100, 4 from 1, 8 below), which matters for low prices."""
+    a = abs(a)
+    half_unit = 0.0005 if a >= 100 else 0.00005 if a >= 1 else 5e-9
+    return 2.5 * AF_TOL + 2 * half_unit / max(a, 1e-12)
+
+
 TRUNCATED_GAP = 10 * 86400  # a short answer is spliced on only if it starts this close to the published end
+TRUNCATED_TFS = ("1d", "1h")  # timeframes whose whole history is years long: a short answer there is not normal
+# For rolling windows (days of 1- and 5-minute bars): a span every whole answer surely covers. An
+# answer that leaves out published bars inside it was cut short; one that only drops older bars rolled.
+ROLLING_SPAN = {"5m": 20 * 86400, "1m": 3 * 86400}
 
 
 def splice_truncated(old: dict | None, new: dict) -> dict | None:
@@ -227,12 +247,31 @@ def splice_truncated(old: dict | None, new: dict) -> dict | None:
     ROKU, SNDK and USDCNH=X: the history comes back days later). Publishing that answer would throw
     away what is published. So when a whole-series fetch has under half the bars of the published
     series and starts later, the published history is kept and the fresh bars are joined on, as
-    long as they agree on any bars both have and do not leave a gap. None: use the fetch as it is."""
+    long as they agree on any bars both have and do not leave a gap. None: use the fetch as it is.
+
+    A one- or five-minute history is a window of days that rolls: for a thinly traded symbol an honest
+    answer can have under half the bars of the last one (a busy session has left the window), and
+    taking that for truncation would stop the file from rolling. So for those the answer must also
+    leave out published bars from the last few days (ROLLING_SPAN), which a rolled window never does."""
     if not old or not old.get("t") or not new.get("t"):
+        return None
+    tf = new.get("tf")
+    if tf not in TRUNCATED_TFS and tf not in ROLLING_SPAN:
         return None
     if len(new["t"]) >= 0.5 * len(old["t"]) or new["t"][0] <= old["t"][0] or new["t"][0] - old["t"][-1] > TRUNCATED_GAP:
         return None
+    span = ROLLING_SPAN.get(tf)
+    if span and sum(1 for t in old["t"] if new["t"][-1] - span <= t < new["t"][0]) < 0.25 * len(old["t"]):
+        return None  # what is missing is older than the window: it rolled
     return join_series(old, new, need=0)
+
+
+def can_join(old: dict, tf: str, now: float) -> bool:
+    """Can the join window reach the carried series' newest bars? If they are older than the
+    window (the first one-minute refresh of a session: the window is today, the bars yesterday's),
+    asking for it would be a wasted request before the whole fetch that must follow."""
+    wall = server._wall_fn((old.get("meta") or {}).get("tz"))
+    return wall(now) - old["t"][-1] < JOIN_SPAN[JOIN_RANGE[tf]]
 
 
 def history_range(d: dict, tier: int) -> str:
@@ -241,6 +280,32 @@ def history_range(d: dict, tier: int) -> str:
     if d.get("rng"):
         return d["rng"]
     return "5y" if tier == 3 and d.get("tf") == "1d" else (BROAD_RANGE if tier == 3 else EXT_RANGE).get(d.get("tf"), "")
+
+
+def build_scale(now: float, last_planned: float | None) -> float:
+    """How much more than a ten-minute build's share of refreshes this build should do: the time
+    since the previous build planned its own, in ten-minute units, between 1 and 3."""
+    return min(3.0, max(1.0, (now - last_planned) / 600)) if last_planned else 1.0
+
+
+def settle_refused(state: dict, prev: dict, keys: list, refused: dict, due: set, now: float) -> None:
+    """Record, in the build's state, the series the provider had nothing for ("gone: ..."):
+      - a copy is published (carried): stamp it as looked at now, so it is asked again on its
+        schedule and not on every build (a delisted symbol, a fund with no trades in the window);
+      - nothing is published: a negative stamp, which keeps it out of the plan for RETRY_DEAD;
+    and keep earlier negative stamps of series that were not asked about this time."""
+    for s, tf in keys:
+        k = f"{s}|{tf}"
+        gone = refused.get((s, tf), "").startswith("gone")
+        if k in state:
+            if gone:
+                state[k] = int(now)
+            elif prev.get(k, 0) > state[k]:
+                state[k] = prev[k]  # carried: write() stamped the file's own fetch time; keep the later look
+        elif gone:
+            state[k] = -int(now)
+        elif prev.get(k, 0) < 0 and (s, tf) not in due:
+            state[k] = prev[k]
 
 
 def published_first(due: list, state: dict) -> list:
@@ -262,7 +327,9 @@ def encode_series(d: dict) -> dict:
              at a dividend, but the provider rounds the column its own way, so a run is kept
              while it reproduces every adjusted close within AF_TOL (a fraction of a cent);
              otherwise the column is published as it is.
-    Decoding gives back t exactly, and a within AF_TOL; decoding and encoding again changes nothing."""
+    Decoding gives back t exactly, and a within AF_TOL plus the rounding of the decoded value
+    (adj_tolerance(): about twice AF_TOL for prices of a few dollars); decoding and encoding again
+    changes nothing, so the error does not grow from build to build."""
     if not d or not d.get("t"):
         return d
     out = {k: v for k, v in d.items() if k not in COLS}
@@ -395,7 +462,9 @@ class Build:
                 if "429" in msg:
                     with self.lock:
                         self.throttled += 1
-                if ("429" in msg or "timed out" in msg) and k < tries - 1:
+                # once the provider is refusing the build, stop waiting on it: the core series fall
+                # back to the published copy and the build's own guards decide
+                if ("429" in msg or "timed out" in msg) and k < tries - 1 and self.throttled < THROTTLE_STOP:
                     time.sleep(6 * (k + 1))
                     continue
                 raise
@@ -465,8 +534,18 @@ class Build:
         """Publish one series file: `raw`, the previous build's own bytes for an unchanged series
         (no need to compress it again), or else `d` compressed."""
         data = raw if raw is not None else series_bytes(d)
-        with open(self.path(tf, symbol), "wb") as f:
-            f.write(data)
+        path = self.path(tf, symbol)
+        tmp = f"{path}.{threading.get_ident()}.tmp"  # whole file or none: never a torn one
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def write(self, d: dict, tier: int, keep: int, fresh: bool, raw: bytes | None = None):
         symbol, tf = d["symbol"], d["tf"]
@@ -521,14 +600,17 @@ class Build:
         except Exception as e:
             try:
                 old = self.previous_series(tf, symbol)
-                if old and tf == "1m" and old["meta"].get("type") in server.STOCK_TYPES:
-                    ext = self.previous_series("x1m", symbol)  # its extended-hours prints go with it
-                    if ext:
-                        self.put("x1m", symbol, ext)
-                        with self.lock:
-                            self.info.setdefault(symbol, {"symbol": symbol, "name": old["meta"].get("name") or symbol, "type": old["meta"].get("type") or "", "exch": old["meta"].get("exchange") or "", "tier": 1, "tfs": []})["tfs"].append("x1m")
             except Unreachable:
                 old = None
+            if old and tf == "1m" and old["meta"].get("type") in server.STOCK_TYPES:
+                try:
+                    ext = self.previous_series("x1m", symbol)  # its extended-hours prints go with it
+                except Unreachable:
+                    ext = None  # the one-minute series is still good without them
+                if ext:
+                    self.put("x1m", symbol, ext)
+                    with self.lock:
+                        self.info.setdefault(symbol, {"symbol": symbol, "name": old["meta"].get("name") or symbol, "type": old["meta"].get("type") or "", "exch": old["meta"].get("exchange") or "", "tier": 1, "tfs": []})["tfs"].append("x1m")
             if old:
                 self.write(old, 1, KEEP[tf], False)
                 return symbol, tf, f"kept the published copy ({e})"
@@ -560,7 +642,7 @@ class Build:
                 old = self.previous_series(tf, symbol)
             except Unreachable:
                 old = None
-            if old and time.time() - (old.get("full") or old.get("fetched") or 0) < FULL_EVERY and history_range(old, tier) == want:
+            if old and time.time() - (old.get("full") or old.get("fetched") or 0) < FULL_EVERY and history_range(old, tier) == want and can_join(old, tf, time.time()):
                 joined = join_series(old, self.yahoo(symbol, tf, JOIN_RANGE[tf], tries=2))
                 if joined:
                     self.write(joined, tier, keep[tf], True)
@@ -632,6 +714,8 @@ def main():
         sys.exit(f"unknown --part={part}")
     core = [s.upper() for s in args[1:]] or ([] if testing else CORE)
     extended, broad, crypto = pick("ext", EXTENDED), pick("broad", BROAD), pick("crypto", CRYPTO)
+    # a symbol listed twice would be two jobs writing one file
+    core, extended, broad, crypto = (list(dict.fromkeys(x)) for x in (core, extended, broad, crypto))
     if part == "broad":
         core, extended, crypto = [], [], []
     shards = [u if u.endswith("/") else u + "/" for u in (opts.get("shard") or "").split(",") if u] if part == "main" else []
@@ -692,13 +776,16 @@ def main():
     now = time.time()
     try:
         prev = (b.previous("state.json") or {}) if keys else {}
-        last_build = (b.previous("stamp.json") or {}).get("generated") if keys else None
+        prev_stamp = (b.previous("stamp.json") or {}) if keys else {}
     except Unreachable as e:
         # without the previous build's record everything would look new and be fetched at once
         sys.exit(f"the previous build could not be read ({e}); not publishing")
-    # builds are meant to run every ten minutes but the scheduler is often late: after a long gap
-    # do proportionally more, so the extended set keeps to its targets
-    scale = min(3, max(1, (now - last_build) / 600)) if last_build and "budget" not in opts else 1
+    # The budgets are sized for a build every ten minutes. Builds are further apart than that (a
+    # run takes minutes, then waits before booking the next, and the scheduler can be late), so do
+    # proportionally more: by the time from the previous build's planning to this one's. (Its
+    # "generated" is written at its end and would leave its own duration out.)
+    last_build = prev_stamp.get("planned") or prev_stamp.get("generated")
+    scale = build_scale(now, last_build) if "budget" not in opts else 1
     b.budget = int(scale * b.budget)
     broad_budget = int(scale * (int(opts["budget"]) if "budget" in opts else BROAD_BUDGET * len(BROAD_PART[part])))
     # The market is in session only if the clock says so AND today has traded. On a holiday the
@@ -732,14 +819,7 @@ def main():
     with ThreadPoolExecutor(max_workers=16) as pool:
         car = list(pool.map(b.carry, rest + undone))
     lost = [(s, tf, f"{refused[(s, tf)]}; {r}" if (s, tf) in refused else r) for s, tf, r in car if r != "carried"]
-    for s, tf in keys:
-        k = f"{s}|{tf}"
-        if k in b.state:
-            continue
-        if refused.get((s, tf), "").startswith("gone"):
-            b.state[k] = -int(now)  # no such symbol, and nothing published: do not ask every build
-        elif prev.get(k, 0) < 0 and (s, tf) not in due:
-            b.state[k] = prev[k]
+    settle_refused(b.state, prev, keys, refused, set(due), now)
     # A build that lost a real share of what was published must not replace it: that is the
     # previous build being unreadable or the provider failing, not symbols going away.
     had = sum(1 for s, tf in keys if prev.get(f"{s}|{tf}", 0) > 0)
@@ -775,7 +855,7 @@ def main():
     with open(os.path.join(data, "catalog.json"), "w") as f:
         f.write(blob)
     with open(os.path.join(data, "stamp.json"), "w") as f:
-        json.dump({"generated": generated, "catalog": hashlib.sha1(blob.encode()).hexdigest()[:12], "symbols": len(catalog["symbols"])}, f, separators=(",", ":"))
+        json.dump({"generated": generated, "planned": int(now), "catalog": hashlib.sha1(blob.encode()).hexdigest()[:12], "symbols": len(catalog["symbols"])}, f, separators=(",", ":"))
     with open(os.path.join(data, "state.json"), "w") as f:
         json.dump(b.state, f, separators=(",", ":"))
     # the market summary in two files, so a view of the core and extended lists (the S&P 500, the

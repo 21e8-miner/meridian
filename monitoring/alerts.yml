@@ -21,7 +21,7 @@ groups:
 
       - alert: MeridianProviderFailing
         expr: |
-          sum by (provider) (rate(meridian_upstream_requests_total{outcome!="ok"}[10m]))
+          sum by (provider) (rate(meridian_upstream_requests_total{outcome!~"ok|no_data"}[10m]))
             / sum by (provider) (rate(meridian_upstream_requests_total[10m])) > 0.25
           and sum by (provider) (rate(meridian_upstream_requests_total[10m])) > 0.01
         for: 10m

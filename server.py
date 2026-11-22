@@ -86,7 +86,7 @@ STOCK_TYPES = ("EQUITY", "ETF")
 # ── metrics (served at /metrics, see metrics.py and monitoring/) ──
 M_HTTP = M.counter("meridian_http_requests_total", "HTTP requests answered, by route and status code.", ("route", "code"))
 M_HTTP_T = M.histogram("meridian_http_request_duration_seconds", "Time to answer an HTTP request, by route.", ("route",))
-M_UP = M.counter("meridian_upstream_requests_total", "Requests to the data providers, by provider and outcome (ok, throttled, http_error, timeout, network_error).", ("provider", "outcome"))
+M_UP = M.counter("meridian_upstream_requests_total", "Requests to the data providers, by provider and outcome (ok, no_data, throttled, http_error, timeout, network_error).", ("provider", "outcome"))
 M_UP_T = M.histogram("meridian_upstream_request_duration_seconds", "Time a data provider took to answer, by provider.", ("provider",))
 M_CACHE = M.counter("meridian_cache_lookups_total", "Series lookups by where the answer came from: memory, disk, fetched, stale (provider failed; last good copy served) or error.", ("result",))
 M_CACHE_N = M.gauge("meridian_cache_series", "Series held in memory.")
@@ -96,6 +96,7 @@ M_PRUNED = M.counter("meridian_cache_pruned_files_total", "Cache files removed b
 M_PRUNED_B = M.counter("meridian_cache_pruned_bytes_total", "Bytes removed by the cache size and age limits.")
 M_FILL = M.counter("meridian_live_fill_total", "Live-estimate attempts on a response: fill (delayed futures projected), ext (stock outside regular hours), none (nothing to add) or error.", ("outcome",))
 M_ANCHOR = M.gauge("meridian_live_anchor_age_seconds", "How old the newest real exchange print was when a live estimate was last built for this symbol (only symbols seen in the last 10 minutes).", ("symbol",))
+_proxy_asked: dict = {}  # coin -> when a live proxy was last asked for (fetched or not)
 M_PROXY = M.gauge("meridian_proxy_last_candle_age_seconds", "Age of the newest 1-minute candle held for each Hyperliquid market used as a live proxy.", ("coin",))
 M_START = M.gauge("meridian_start_time_seconds", "When this server started, as Unix time.")
 M_START.set(time.time())
@@ -127,11 +128,39 @@ def hl_coin(symbol: str) -> str | None:
 LAG_MIN = 20
 
 
+# Regular hours of the other markets Meridian lists, by ticker suffix: (time zone, open, close) in
+# local minutes of the day. Their lunch breaks (Tokyo, Hong Kong) count as open; holidays are not
+# known. web/js/static.js has the same table (tests/parity.mjs compares the two).
+WORLD_SESSIONS = {
+    ".T": ("Asia/Tokyo", 540, 930), ".HK": ("Asia/Hong_Kong", 570, 960), ".L": ("Europe/London", 480, 990),
+    ".DE": ("Europe/Berlin", 540, 1050), ".PA": ("Europe/Paris", 540, 1050), ".AS": ("Europe/Amsterdam", 540, 1050),
+    ".MC": ("Europe/Madrid", 540, 1050), ".MI": ("Europe/Rome", 540, 1050), ".SW": ("Europe/Zurich", 540, 1050),
+    ".ST": ("Europe/Stockholm", 540, 1050), ".AX": ("Australia/Sydney", 600, 960), ".NS": ("Asia/Kolkata", 555, 930),
+    ".TO": ("America/Toronto", 570, 960), ".KS": ("Asia/Seoul", 540, 930),
+}
+WORLD_INDEX = {"^N225": ".T", "^HSI": ".HK", "^FTSE": ".L", "^GDAXI": ".DE", "^STOXX50E": ".DE", "^FCHI": ".PA",
+               "^AXJO": ".AX", "^BSESN": ".NS", "^GSPTSE": ".TO", "^KS11": ".KS"}
+
+
+def world_session(symbol: str):
+    """(time zone, open, close) for a symbol traded on one of WORLD_SESSIONS' markets, else None."""
+    key = WORLD_INDEX.get(symbol)
+    if key is None:
+        i = symbol.rfind(".")
+        key = symbol[i:] if i > 0 else None
+    return WORLD_SESSIONS.get(key) if key else None
+
+
 def session_open(symbol: str, now: datetime | None = None, lag: int = LAG_MIN) -> bool:
     """Is this instrument's market trading (or, with lag, its delayed data still arriving)?"""
     if _is_crypto(symbol) or hl_coin(symbol):
         return True
     now = now or datetime.now(ET)
+    w = world_session(symbol)
+    if w:  # another market: its own clock, not New York's
+        loc = now.astimezone(ZoneInfo(w[0]))
+        m = loc.hour * 60 + loc.minute
+        return loc.weekday() < 5 and (w[1] - 5 if lag else w[1]) <= m <= w[2] + lag
     wd, mins = now.weekday(), now.hour * 60 + now.minute  # Monday = 0
     if symbol.endswith("=F"):  # futures: Sunday 18:00 to Friday 17:00 ET, shut 17:00-18:00 daily
         if wd == 5:
@@ -186,6 +215,18 @@ def _http_json(url: str, payload: dict | None = None):
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         outcome = "throttled" if e.code == 429 else "http_error"
+        if e.code != 429:
+            # The provider says "no such symbol" or "outside the window I keep" with an error status
+            # and a JSON document. That is an answer, not a failure of the provider: count it apart
+            # (an alert on failures should not fire because a watchlist holds a delisted symbol),
+            # and hand the document on, since the body can be read only once.
+            try:
+                e.doc = json.loads(e.read().decode("utf-8"))
+                # a client error carrying a chart document is the provider's answer; a 5xx is a failure whatever its body
+                if e.code < 500 and isinstance(e.doc, dict) and isinstance(e.doc.get("chart"), dict):
+                    outcome = "no_data"
+            except Exception:
+                e.doc = None
         raise
     except Exception as e:
         outcome = "timeout" if "timed out" in str(e) or isinstance(e, TimeoutError) else "network_error"
@@ -221,9 +262,8 @@ def _fetch_yahoo(symbol: str, tf: str, rng: str | None = None) -> dict:
     try:
         doc = _http_json(url)
     except urllib.error.HTTPError as e:
-        try:
-            doc = json.loads(e.read().decode("utf-8"))
-        except Exception:
+        doc = getattr(e, "doc", None)  # read by _http_json
+        if not isinstance(doc, dict) or "chart" not in doc:
             raise RuntimeError(f"HTTP {e.code} from data provider")
     if ext:
         data = parse_chart(doc, symbol, "1m")
@@ -265,7 +305,10 @@ def parse_chart(doc: dict, symbol: str, tf: str) -> dict:
     session_end = ((meta.get("currentTradingPeriod") or {}).get("regular") or {}).get("end")
     off_cache: dict[int, int] = {}
     # a stock, fund or coin cannot trade at zero: a zero open, high or low is the provider's blank
-    # (early days of a coin, some old rows). Rates, indexes and futures can be at or below zero.
+    # (early days of a coin, some old rows). For rates, indexes and futures an open, high or low
+    # at or below zero is kept as it is. A bar whose CLOSE is zero or negative is left out for
+    # every instrument (crude's negative settlement of 20 April 2020 is not in the history): a
+    # close at or below zero breaks returns, log scales and every ratio built on it.
     priced = (meta.get("instrumentType") or "") in ("EQUITY", "ETF", "CRYPTOCURRENCY", "MUTUALFUND")
     t_out, o_out, h_out, l_out, c_out, v_out, a_out = [], [], [], [], [], [], []
     for i, t in enumerate(ts):
@@ -392,6 +435,7 @@ _hl_names: tuple[float, list] = (0.0, [])
 def proxy_minutes(coin: str, start_s: int) -> list:
     """1-minute candles of a live market from start_s to now as (utc, o, h, l, c).
     The history is kept and only its last few minutes are re-fetched (at most every 3 s)."""
+    _proxy_asked[coin] = time.time()
     hit, now = _proxy_cache.get(coin), time.time()
     if hit and now - hit[0] < 3 and hit[1] <= start_s:
         return hit[2]
@@ -737,7 +781,10 @@ def _collect():
     M_DISK_N.set(n)
     M_PROXY.clear()
     for coin, (_, _, rows) in list(_proxy_cache.items()):
-        if rows:
+        # only proxies ASKED FOR in the last ten minutes: an entry nobody uses any more (a stock's
+        # proxy once its regular session opens) would otherwise age for ever and trip the alert.
+        # Asked, not fetched: if Hyperliquid stops answering, the gauge must keep growing.
+        if rows and now - _proxy_asked.get(coin, 0) <= 600:
             M_PROXY.set(max(0.0, now - rows[-1][0]), coin=coin)
     M_ANCHOR.clear()
     for sym, (seen, age) in list(_anchor_seen.items()):
@@ -898,7 +945,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             return self._get()
         finally:
-            M_HTTP.inc(route=route, code=self._code or 0)
+            M_HTTP.inc(route=route, code=int(self._code or 0))  # int: an HTTPStatus prints as "HTTPStatus.OK" before Python 3.11
             M_HTTP_T.observe(time.time() - t0, route=route)
 
     def _get(self):
