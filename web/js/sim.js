@@ -16,6 +16,10 @@ export function simulate(base, byTf, c, extra = {}) {
   if (Number(c.years) > 0) { const cut = base.t[n - 1] - Number(c.years) * 31557600; while (from < n - 1 && base.t[from] < cut) from++; }
   const entry = evalRuleset(c.entry, base, byTf).mask, exit = evalRuleset(c.exit, base, byTf).mask;
   if (extra.maskBefore != null) for (let i = 0; i < n; i++) if (base.t[i] <= extra.maskBefore) entry[i] = false;
-  const res = runBacktest(base, entry, exit, { side: c.side, stopPct: +c.stopPct || 0, targetPct: +c.targetPct || 0, trailPct: +c.trailPct || 0, maxBars: +c.maxBars || 0, feeBps: +c.feeBps || 0, slipBps: +c.slipBps || 0, capital: +c.capital || 10000, sizePct: +c.sizePct || 100, from: extra.from != null ? extra.from : from });
+  const res = runBacktest(base, entry, exit, engineOpts(c, extra.from != null ? extra.from : from));
   return { res, stats: summarize(base, res), entry, exit };
+}
+// The engine settings a strategy config stands for (one place, so every rerun matches the report).
+export function engineOpts(c, from) {
+  return { side: c.side, stopPct: +c.stopPct || 0, targetPct: +c.targetPct || 0, trailPct: +c.trailPct || 0, maxBars: +c.maxBars || 0, feeBps: +c.feeBps || 0, slipBps: +c.slipBps || 0, capital: +c.capital || 10000, sizePct: +c.sizePct || 100, from };
 }

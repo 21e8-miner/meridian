@@ -1,9 +1,8 @@
 // Pure research helpers for the Strategy Tester: per-year breakdown, parameter sweeps,
 // in-sample / out-of-sample audits, deterministic Monte Carlo resampling, and cost sensitivity.
 // No DOM here, so tests can import it.
-import { evalRuleset } from './conditions.js';
 import { runBacktest, summarize } from './engine.js';
-import { simulate } from './sim.js';
+import { simulate, engineOpts } from './sim.js';
 
 // Strategy and buy & hold return for each calendar year in the test window.
 export function yearly(base, res) {
@@ -144,41 +143,68 @@ export function monteCarlo(base, res, { trials = 1000, seed = 42, sizePct = 100,
   const S = steps.length;
   const actual = new Array(S); actual[0] = capital;
   let eqAct = capital, nextPt = 1;
-  const mults = new Float64Array(m);
+  // Per trade: its equity multiple, and from the backtest's bar-by-bar equity (relative to the
+  // equity just before entry) its lowest and highest mark and its worst fall from a peak inside
+  // the trade. Drawdowns then count losses while a trade is open, as the report's do; without
+  // a usable equity path a trade counts only at its close. `sizePct` should match the run's.
+  const mults = new Float64Array(m), lows = new Float64Array(m), highs = new Float64Array(m), inner = new Float64Array(m);
   for (let i = 0; i < m; i++) {
-    const mult = Math.max(0, 1 + (trades[i].pnlPct / 100) * scale);
-    mults[i] = mult;
+    const tr = trades[i], mult = Math.max(0, 1 + (tr.pnlPct / 100) * scale);
+    mults[i] = mult; lows[i] = mult; highs[i] = mult; inner[i] = 1;
+    const e0 = tr.entryI > 0 ? res.equity[tr.entryI - 1] : NaN;
+    if (e0 > 0 && tr.exitI >= tr.entryI) {
+      let lo = Infinity, hi = 1, dd = 1, ok = true;
+      for (let k = tr.entryI; k <= tr.exitI; k++) {
+        const r = res.equity[k] / e0;
+        if (!Number.isFinite(r)) { ok = false; break; }
+        if (r > hi) hi = r;
+        if (r < lo) lo = r;
+        if (r / hi < dd) dd = r / hi;
+      }
+      if (ok) { lows[i] = Math.max(0, lo); highs[i] = Math.max(hi, mult); inner[i] = Math.max(0, dd); }
+    }
     eqAct *= mult;
     while (nextPt < S && steps[nextPt] === i + 1) actual[nextPt++] = eqAct;
   }
+  // Running max drawdown over a sequence of trades (indices into the arrays above), in %.
+  const pathDD = (pickAt) => {
+    let eq = capital, peak = capital, worst = 1;
+    for (let i = 0; i < m; i++) {
+      const j = pickAt(i);
+      const v = eq > 0 ? Math.min((eq * lows[j]) / peak, inner[j]) : 0;
+      if (v < worst) worst = v;
+      peak = Math.max(peak, eq * highs[j]);
+      eq *= mults[j];
+    }
+    return (worst - 1) * 100;
+  };
 
   let netStats, ddStats, probLoss = 0;
   const fanP5 = new Array(S).fill(capital), fanP50 = new Array(S).fill(capital), fanP95 = new Array(S).fill(capital);
   if (m === 0) {
     netStats = { p5: 0, p25: 0, p50: 0, p75: 0, p95: 0, mean: 0 };
-    ddStats = { p5: 0, p50: 0, p95: 0, mean: 0 };
+    ddStats = { p5: 0, p50: 0, p95: 0, mean: 0, actual: 0 };
   } else {
     const nets = new Float64Array(trials), dds = new Float64Array(trials);
     const cols = Array.from({ length: S }, () => new Float64Array(trials));
     let losses = 0, sumNet = 0, sumDd = 0;
+    const picks = new Int32Array(m);
     for (let t = 0; t < trials; t++) {
-      let eq = capital, peak = capital, maxDD = 0, pt = 1;
+      let eq = capital, pt = 1;
       cols[0][t] = capital;
       for (let i = 0; i < m; i++) {
-        const pick = Math.floor(rng() * m);
+        const pick = (picks[i] = Math.floor(rng() * m));
         eq *= mults[pick];
-        if (eq > peak) peak = eq;
-        const dd = peak > 0 ? (eq / peak - 1) * 100 : -100;
-        if (dd < maxDD) maxDD = dd;
         if (pt < S && steps[pt] === i + 1) cols[pt++][t] = eq;
       }
+      const maxDD = pathDD((i) => picks[i]);
       const net = (eq / capital - 1) * 100;
       nets[t] = net; dds[t] = maxDD; sumNet += net; sumDd += maxDD;
       if (net < 0) losses++;
     }
     nets.sort(); dds.sort();
     netStats = { p5: quantile(nets, 0.05), p25: quantile(nets, 0.25), p50: quantile(nets, 0.5), p75: quantile(nets, 0.75), p95: quantile(nets, 0.95), mean: sumNet / trials };
-    ddStats = { p5: quantile(dds, 0.05), p50: quantile(dds, 0.5), p95: quantile(dds, 0.95), mean: sumDd / trials };
+    ddStats = { p5: quantile(dds, 0.05), p50: quantile(dds, 0.5), p95: quantile(dds, 0.95), mean: sumDd / trials, actual: pathDD((i) => i) };
     probLoss = (losses / trials) * 100;
     for (let j = 1; j < S; j++) {
       cols[j].sort();
@@ -231,19 +257,15 @@ export function monteCarlo(base, res, { trials = 1000, seed = 42, sizePct = 100,
 /**
  * Execution cost / slippage sensitivity curve.
  * Evaluates the strategy's exact entry/exit signals across a grid of round-trip friction
- * levels (split equally per side) and bisects the exact breakeven round-trip friction (bps)
- * where net return crosses 0%.
+ * levels and bisects the exact breakeven round-trip friction (bps) where net return crosses 0%.
+ * Each level is split per side and between fee and slippage in the configured proportion
+ * (all fee when nothing is configured): slippage moves the entry price and so the stop and
+ * target levels, so the level equal to the configured cost reproduces the report exactly.
  */
 export function costSensitivity(base, byTf, c, { levels = [0, 5, 10, 15, 25, 40, 60], maxBreakevenBps = 200 } = {}) {
-  const n = base.t.length;
-  let from = 0;
-  if (Number(c.years) > 0) { const cut = base.t[n - 1] - Number(c.years) * 31557600; while (from < n - 1 && base.t[from] < cut) from++; }
-  const entry = evalRuleset(c.entry, base, byTf).mask, exit = evalRuleset(c.exit, base, byTf).mask;
-  const baseOpts = {
-    side: c.side, stopPct: +c.stopPct || 0, targetPct: +c.targetPct || 0, trailPct: +c.trailPct || 0,
-    maxBars: +c.maxBars || 0, capital: +c.capital || 10000, sizePct: +c.sizePct || 100, from,
-  };
-  const evalAt = (rtBps) => summarize(base, runBacktest(base, entry, exit, { ...baseOpts, feeBps: rtBps / 2, slipBps: 0 }));
+  const { entry, exit, res } = simulate(base, byTf, c), opts = engineOpts(c, res.from);
+  const perSide = opts.feeBps + opts.slipBps, feeShare = perSide > 0 ? opts.feeBps / perSide : 1;
+  const evalAt = (rtBps) => summarize(base, runBacktest(base, entry, exit, { ...opts, feeBps: (rtBps / 2) * feeShare, slipBps: (rtBps / 2) * (1 - feeShare) }));
   const rows = levels.map((rtBps) => {
     const s = evalAt(rtBps);
     return { rtBps, perSideBps: rtBps / 2, netPct: s.netPct, cagr: s.cagr, sharpe: s.sharpe, maxDD: s.maxDD, profitFactor: s.profitFactor, avgTrade: s.avgTrade, trades: s.trades };
@@ -270,6 +292,5 @@ export function costSensitivity(base, byTf, c, { levels = [0, 5, 10, 15, 25, 40,
       breakevenBps = +((lo + hi) / 2).toFixed(2);
     }
   }
-  const currentRtBps = 2 * ((+c.feeBps || 0) + (+c.slipBps || 0));
-  return { rows, breakevenBps, maxBreakevenBps, currentRtBps };
+  return { rows, breakevenBps, maxBreakevenBps, currentRtBps: 2 * perSide, feeShare };
 }

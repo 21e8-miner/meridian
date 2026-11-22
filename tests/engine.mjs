@@ -98,6 +98,13 @@ check('csv quoting', toCsv([['a', 'b,c', 'say "hi"'], [1, null, 2.5]]) === 'a,"b
     near(mc1.sharpe.observed, stats.sharpe, 1e-9) &&
     mc1.sharpe.ci95Lo <= mc1.sharpe.p5 && mc1.sharpe.p5 <= mc1.sharpe.p50 && mc1.sharpe.p50 <= mc1.sharpe.p95 && mc1.sharpe.p95 <= mc1.sharpe.ci95Hi &&
     mc1.sharpe.probPositive >= 0 && mc1.sharpe.probPositive <= 100);
+  // Regression: drawdowns were measured only at trade closes, so they looked shallower than the
+  // report's. Replaying the trades in their real order must give the report's drawdown exactly.
+  for (const risk of [{}, { maxBars: 0 }, { stopPct: 3, targetPct: 6, maxBars: 0 }]) {
+    const cfg = { ...c, sizePct: 50, ...risk }, run = simulate(d, new Map(), cfg), mc = monteCarlo(d, run.res, { trials: 50, seed: 3, sizePct: 50 });
+    check(`monteCarlo: trades in their real order give the report's max drawdown (${Object.keys(risk).join(' + ') || 'time exit'})`,
+      run.res.trades.length > 0 && near(mc.maxDD.actual, run.stats.maxDD, 1e-9), `${mc.maxDD.actual} vs ${run.stats.maxDD}`);
+  }
   const emptyMc = monteCarlo(d, runBacktest(d, F, F, {}), { trials: 100, seed: 7 });
   check('monteCarlo: zero trades handled without NaN in return/DD',
     emptyMc.trades === 0 && emptyMc.net.p50 === 0 && emptyMc.maxDD.p5 === 0 && emptyMc.probLoss === 0 && Number.isNaN(emptyMc.sharpe.observed));
@@ -113,14 +120,22 @@ check('csv quoting', toCsv([['a', 'b,c', 'say "hi"'], [1, null, 2.5]]) === 'a,"b
   const cCost = { ...c, feeBps: 3, slipBps: 2 };
   const cs = costSensitivity(d, new Map(), cCost, { levels: [0, 5, 10, 15, 25, 40, 60], maxBreakevenBps: 200 });
   const mono = cs.rows.every((r, i) => i === 0 || r.netPct <= cs.rows[i - 1].netPct + 1e-9);
+  // A round trip of rt bps, split per side 3 : 2 between fee and slippage like the config.
+  const at = (rt, cfg = cCost) => simulate(d, new Map(), { ...cfg, feeBps: (rt / 2) * 0.6, slipBps: (rt / 2) * 0.4 }).stats.netPct;
   const s0 = simulate(d, new Map(), { ...cCost, feeBps: 0, slipBps: 0 }).stats;
-  const s10 = simulate(d, new Map(), { ...cCost, feeBps: 5, slipBps: 0 }).stats;
   check('costSensitivity: net return decreases monotonically with friction and matches simulate()',
-    mono && near(cs.rows[0].netPct, s0.netPct) && near(cs.rows[2].netPct, s10.netPct) && cs.currentRtBps === 10 && cCost.feeBps === 3);
+    mono && near(cs.rows[0].netPct, s0.netPct) && near(cs.rows[2].netPct, simulate(d, new Map(), cCost).stats.netPct) && near(cs.rows[4].netPct, at(25)) &&
+    cs.currentRtBps === 10 && near(cs.feeShare, 0.6) && cCost.feeBps === 3);
+  // Regression: friction was all booked as a fee, but slippage moves the entry price and so the
+  // stop and target levels; with them set the curve missed the report at the configured cost.
+  for (const risk of [{ stopPct: 3, targetPct: 6 }, { trailPct: 4 }]) {
+    const cfg = { ...cCost, ...risk, feeBps: 5, slipBps: 10, maxBars: 0 }, sens = costSensitivity(d, new Map(), cfg, { levels: [0, 30] });
+    const report = simulate(d, new Map(), cfg).stats.netPct;
+    check(`costSensitivity: at the configured cost the curve is the report (${Object.keys(risk).join(' + ')})`, near(sens.rows[1].netPct, report), `${sens.rows[1].netPct} vs ${report}`);
+  }
+  check('costSensitivity: with no cost configured every level is a fee', costSensitivity(d, new Map(), c, { levels: [0] }).feeShare === 1);
   if (cs.breakevenBps > 0 && Number.isFinite(cs.breakevenBps)) {
-    const atBe = simulate(d, new Map(), { ...cCost, feeBps: cs.breakevenBps / 2, slipBps: 0 }).stats.netPct;
-    const belowBe = simulate(d, new Map(), { ...cCost, feeBps: Math.max(0, (cs.breakevenBps - 0.5) / 2), slipBps: 0 }).stats.netPct;
-    const aboveBe = simulate(d, new Map(), { ...cCost, feeBps: (cs.breakevenBps + 0.5) / 2, slipBps: 0 }).stats.netPct;
+    const atBe = at(cs.breakevenBps), belowBe = at(Math.max(0, cs.breakevenBps - 0.5)), aboveBe = at(cs.breakevenBps + 0.5);
     check('costSensitivity: bisected breakeven friction crosses 0% accurately',
       Math.abs(atBe) < 0.1 && belowBe > 0 && aboveBe <= 0, `breakeven ${cs.breakevenBps} bps -> ${atBe.toFixed(3)}%`);
   } else {
