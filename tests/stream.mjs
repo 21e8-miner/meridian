@@ -90,4 +90,22 @@ check('follows: nothing for real prints, a missing ratio or no live at all',
   check('a new line subscribes everything wanted again', JSON.stringify(subs(made[made.length - 1], 'subscribe')) === '["xyz:SP500","xyz:XYZ100"]');
   clearInterval(s.ping);
 }
+
+// ── alerts checked on every trade (web/js/alerts.js) ──
+{
+  const { watchFor, liveCross } = await import('../web/js/alerts.js');
+  const fut = series(), w = watchFor(fut);
+  check('an alert on a future with a live estimate watches its proxy at the estimate\'s ratio, from the poll\'s time',
+    JSON.stringify(w) === JSON.stringify({ coin: 'xyz:XYZ100', ratio: 0.5, asof: 1000 }));
+  const nat = watchFor({ symbol: 'XYZ:GOLD', tf: '1d', t: [T0], o: [1], h: [1], l: [1], c: [1], v: [1], meta: { exchange: 'Hyperliquid', asof: 500 } });
+  check('... and one on a Hyperliquid market watches the market itself', nat.coin === 'xyz:GOLD' && nat.ratio === 1 && nat.asof === 500);
+  check('a stock\'s overnight estimate and a plain series are not watched (the minute check reads real prints)',
+    watchFor(series({ symbol: 'NVDA', live: { kind: 'ext', src: 'xyz:NVDA', ratio: 2, isEst: true, asof: 1 } })) === null && watchFor(series({ live: undefined })) === null);
+  const a = { active: true, side: 'below', level: 105 };
+  check('a trade that carries the price across the level is a cross', liveCross(a, w, 'xyz:XYZ100', 210.2, 2_000_000) === 'above');
+  check('one that leaves it on the same side is not', liveCross(a, w, 'xyz:XYZ100', 209.8, 2_000_000) === null && liveCross({ ...a, side: 'above' }, w, 'xyz:XYZ100', 209.8, 2_000_000) === 'below');
+  check('no cross from another market, a trade no newer than the check, a bad price, or an alert that is paused or has no side yet',
+    liveCross(a, w, 'xyz:GOLD', 300, 2_000_000) === null && liveCross(a, w, 'xyz:XYZ100', 300, 1_000_000) === null && liveCross(a, w, 'xyz:XYZ100', NaN, 2_000_000) === null &&
+    liveCross({ ...a, active: false }, w, 'xyz:XYZ100', 300, 2_000_000) === null && liveCross({ ...a, side: null }, w, 'xyz:XYZ100', 300, 2_000_000) === null && liveCross(a, null, 'xyz:XYZ100', 300, 2_000_000) === null);
+}
 done('stream');

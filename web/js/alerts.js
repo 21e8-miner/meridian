@@ -1,12 +1,14 @@
-// Alerts (price level, drawn line, rule set) and paper bots. Checked once a minute while the app is open.
+// Alerts (price level, drawn line, rule set) and paper bots. Checked once a minute while the app is open;
+// price and line alerts on a symbol that follows a Hyperliquid market are also checked on every trade.
 import { h, add, clear, store, bus, toast, uid, fmtPrice, fmtStamp, fmtPct } from './util.js';
 import { getBars, tfLabel, TFS, isIntraday } from './data.js';
 import { ruleBuilder, evalRuleset, requiredTfs, describeRuleset, newRuleset, cmp, ind, num } from './conditions.js';
 import { prepare, simulate } from './sim.js';
 import { api } from './api.js';
+import { follows } from './stream.js';
 
 let list = store.get('alerts', []), bots = store.get('bots', []), log = store.get('alertlog', []), unseen = store.get('alerts.unseen', 0);
-let root = null, timer = null, busy = false;
+let root = null, timer = null, busy = false, again = false;
 const persist = () => { store.set('alerts', list); store.set('bots', bots); store.set('alertlog', log.slice(0, 200)); store.set('alerts.unseen', unseen); bus.emit('alerts'); badge(); if (root) draw(); };
 function badge() { const b = document.getElementById('alert-badge'); if (!b) return; b.hidden = !unseen; b.textContent = unseen; }
 
@@ -21,6 +23,35 @@ export function addPriceAlert(symbol, price) { list.unshift({ id: uid(), kind: '
 export function addLineAlert(symbol, tf, d) { list.unshift({ id: uid(), kind: 'line', symbol, tf, type: d.type, pts: d.pts.map((p) => ({ ...p })), active: true, side: null, created: Date.now() }); persist(); tick(); }
 export function addRuleAlert(symbol, tf, rs, repeat) { list.unshift({ id: uid(), kind: 'rules', symbol, tf, rs: JSON.parse(JSON.stringify(rs)), repeat: !!repeat, active: true, lastT: null, created: Date.now() }); persist(); tick(); }
 export function addBot(b) { bots.unshift({ id: uid(), active: true, seen: 0, created: Date.now(), ...b }); persist(); tick(); }
+
+// ── checked on every trade ──
+// A price or line alert whose symbol follows a live Hyperliquid market (a future's live estimate, an
+// XYZ: chart) need not wait for the minute: `watch` keeps, per alert, the market and ratio its last
+// check found. A stock's overnight estimate is left out: the minute check reads the session's close
+// there, and an alert should not fire on an estimate the chart itself draws dotted.
+const watch = new Map(); // alert id -> { coin, ratio, asof }
+export function watchFor(bars) {
+  const f = follows(bars);
+  if (!f || f.kind === 'ext') return null;
+  return { coin: f.coin, ratio: f.ratio, asof: bars.live ? bars.live.asof : (bars.meta && bars.meta.asof) || 0 };
+}
+// The side a trade puts the price on when that is a cross of alert `a`'s level, else null.
+export function liveCross(a, w, coin, px, atMs) {
+  if (!a.active || !a.side || !w || w.coin !== coin || !(px > 0) || !(a.level > 0) || atMs / 1000 <= w.asof) return null;
+  const side = px * w.ratio >= a.level ? 'above' : 'below';
+  return side === a.side ? null : side;
+}
+export function streamCoins() { const out = new Set(); for (const a of list) { const w = a.active && watch.get(a.id); if (w) out.add(w.coin); } return out; }
+export function onTick(coin, px, atMs) {
+  let changed = false;
+  for (const a of list) {
+    const w = watch.get(a.id), side = liveCross(a, w, coin, px, atMs);
+    if (!side) continue;
+    a.lastPx = px * w.ratio; a.active = false; a.firedAt = Date.now(); changed = true;
+    fire(`${a.symbol} crossed ${side} ${a.kind === 'line' ? 'your line at ' : ''}${fmtPrice(a.level)} (last ${fmtPrice(a.lastPx)}, live)`, a.symbol, a.tf);
+  }
+  if (changed) persist();
+}
 
 function idxOfT(bars, t) {
   const T = bars.t, n = T.length, dt = n > 1 ? T[n - 1] - T[n - 2] : 86400;
@@ -37,7 +68,8 @@ function lineLevel(a, bars) {
 }
 
 export async function tick() {
-  if (busy) return; busy = true;
+  if (busy) { again = true; return; } // something was added mid-check: check once more after it
+  busy = true;
   let changed = false;
   try {
     for (const a of list) {
@@ -47,6 +79,8 @@ export async function tick() {
           const bars = await getBars(a.symbol, a.kind === 'line' ? a.tf : '1d', { maxAge: 50000 }), n = bars.t.length, px = bars.c[n - 1];
           const level = a.kind === 'price' ? a.price : lineLevel(a, bars), side = px >= level ? 'above' : 'below';
           a.level = level; a.lastPx = px;
+          const w = watchFor(bars), had = watch.get(a.id); if (w) watch.set(a.id, w); else watch.delete(a.id);
+          if ((w && w.coin) !== (had && had.coin)) changed = true; // the app follows a different set of markets
           if (a.side && side !== a.side) { fire(`${a.symbol} crossed ${side} ${a.kind === 'line' ? 'your line at ' : ''}${fmtPrice(level)} (last ${fmtPrice(px)})`, a.symbol, a.tf); a.active = false; a.firedAt = Date.now(); changed = true; }
           else if (!a.side) { a.side = side; changed = true; }
         } else {
@@ -77,6 +111,7 @@ export async function tick() {
     }
   } finally { busy = false; }
   if (changed) persist(); else if (root) draw();
+  if (again) { again = false; tick(); }
 }
 export function start() { badge(); if (timer) return; timer = setInterval(() => { if (list.some((a) => a.active) || bots.some((b) => b.active)) tick(); }, 60000); setTimeout(tick, 2500); }
 
@@ -95,7 +130,7 @@ export function mount(el) {
 function drawForm() {
   clear(formEl);
   const notif = window.Notification ? Notification.permission : 'unsupported';
-  add(formEl, h('h2', null, 'Alerts & Bots'), h('p', { class: 'hint' }, 'Alerts and paper bots are checked once a minute while this app is open in a browser tab. Right-click a chart to alert on a price or on a line you drew.'),
+  add(formEl, h('h2', null, 'Alerts & Bots'), h('p', { class: 'hint' }, 'Alerts and paper bots are checked once a minute while this app is open in a browser tab; a price or line alert on a symbol with a live Hyperliquid market (a future with a live estimate, an XYZ: market) is checked on every trade. Right-click a chart to alert on a price or on a line you drew.'),
     h('h4', null, 'New alert'),
     h('div', { class: 'row' },
       h('label', { class: 'field' }, 'Symbol', h('input', { type: 'text', value: form.symbol, style: { width: '96px', textTransform: 'uppercase' }, onchange: (e) => (form.symbol = e.target.value.trim().toUpperCase()) })),
@@ -128,7 +163,7 @@ function draw() {
   if (!list.length) listEl.append(h('div', { class: 'hint' }, 'No alerts yet.'));
   for (const a of list) listEl.append(h('div', { class: 'list-item' },
     h('span', { class: 'pill ' + (a.active ? 'on' : a.firedAt ? 'hit' : '') }, a.active ? 'active' : a.firedAt ? 'triggered' : 'paused'),
-    h('div', { class: 't' }, h('b', null, a.symbol), ' ', describe(a), h('small', null, a.error ? 'Error: ' + a.error : a.kind === 'rules' ? (a.state ? 'Rules are met on the latest bar' : 'Rules not met yet') : a.lastPx ? `Last ${fmtPrice(a.lastPx)} · waiting for a cross from ${a.side || '…'}` : 'Waiting for first check')),
+    h('div', { class: 't' }, h('b', null, a.symbol), ' ', describe(a), h('small', null, a.error ? 'Error: ' + a.error : a.kind === 'rules' ? (a.state ? 'Rules are met on the latest bar' : 'Rules not met yet') : a.lastPx ? `Last ${fmtPrice(a.lastPx)} · waiting for a cross from ${a.side || '…'}${a.active && watch.has(a.id) ? ' · checked on every trade' : ''}` : 'Waiting for first check')),
     h('button', { onclick: () => api.openChart(a.symbol, a.tf) }, 'Chart'),
     h('button', { onclick: () => { a.active = !a.active; if (a.active) { a.side = null; a.lastT = null; a.firedAt = null; } persist(); if (a.active) tick(); } }, a.active ? 'Pause' : 'Re-arm'),
     h('button', { class: 'icon-btn', title: 'Delete', onclick: () => { list = list.filter((x) => x !== a); persist(); } }, '✕')));

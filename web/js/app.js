@@ -120,6 +120,7 @@ class Panel {
 // stream.js); the polls below still re-anchor them to the exchange.
 let wlRender = 0;
 const stream = new Stream((coin, px, at, candle) => {
+  alerts.onTick(coin, px, at);
   for (const p of panels) {
     const b = p.bars, f = follows(b);
     if (f && f.coin === coin && applyTick(b, px, at, wallNow(b.meta.tz), candle)) { p.chart.tick(); if (p.idx === state.active) updateStatus(); }
@@ -142,6 +143,7 @@ function syncStream() {
   const coins = new Set();
   for (const p of panels) { const f = follows(p.bars); if (f) coins.add(f.coin); }
   for (const w of wl.follow.values()) coins.add(w.coin);
+  for (const c of alerts.streamCoins()) coins.add(c);
   stream.want(coins);
 }
 
@@ -577,7 +579,7 @@ function init() {
   buildToolbar(); buildDrawTools(); initSearch(); buildPanels(); renderWatchlist(); refreshQuotes();
   if (linked && linked.view !== 'chart') goto(linked.view); else writeHash();
   alerts.start();
-  bus.on('alerts', () => { for (const p of panels) p.chart.setAlertLines(alerts.priceLevels(p.cfg.symbol)); });
+  bus.on('alerts', () => { for (const p of panels) p.chart.setAlertLines(alerts.priceLevels(p.cfg.symbol)); syncStream(); });
   bus.on('rulesets', () => renderAnalysis());
   // Charts with a live estimate refresh every 5 s, other intraday charts of an open market every
   // 15 s, everything else once a minute.

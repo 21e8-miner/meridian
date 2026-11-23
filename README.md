@@ -42,7 +42,7 @@ npm test
 | **Auto analysis** | Trendlines through swing pivots (with touch counts and break detection), support / resistance zones, Fibonacci retracement of the dominant swing, 20 candlestick patterns, chart patterns (double top / bottom, head & shoulders, triangles, wedges, channels, rectangle), open gaps. A side panel lists what was found plus a multi-timeframe trend table. |
 | **Scanner** | Filters on daily values (change over 1 day to 1 year, dollar and relative volume, RSI, distance from the 50 and 200 SMA and the 52-week range, ATR, gap), then conditions built by pointing and clicking or typed as text (`close > sma(200) and rsi(14) < 30 @1w`): indicator vs indicator or value, crosses, candlestick patterns, auto-analysis signals, each on its own timeframe. Built-in lists or any watchlist. Ten presets. Results save to a watchlist or CSV. On the shared page the filters and the presets run on every symbol at once (below). |
 | **Strategy Tester** | Entry and exit rules from the same builder, long or short, stop / target / trailing stop / time exit, fees and slippage. Report with equity vs buy & hold, drawdown, a year-by-year table, trade list (CSV export), trades drawn on the chart. Dividends included by default. **Stress test** audits the 70 / 30 in-sample vs out-of-sample split, runs 1,000 deterministic Monte Carlo resamples (return & drawdown distributions, equity fan, block-bootstrap Sharpe 95% CI), and traces execution cost sensitivity to the exact breakeven friction. **Sweep a setting** runs a range of values for any number in the strategy and shows in-sample next to out-of-sample. Runs one symbol or a whole list. |
-| **Alerts & Bots** | Price-level alerts, alerts on a line you drew (right-click the chart), multi-factor rule alerts. Paper bots track a tested strategy forward from the moment of deployment. |
+| **Alerts & Bots** | Price-level alerts, alerts on a line you drew (right-click the chart), multi-factor rule alerts. Price and line alerts on a symbol with a live Hyperliquid market fire on the trade that crosses. Paper bots track a tested strategy forward from the moment of deployment. |
 | **Indicator Studio** | Write indicators in JavaScript. Saved scripts work on charts and inside scan, strategy and alert conditions. |
 | **Model Lab** | Logistic regression or boosted stumps predicting "up more than X% in N bars" from indicator inputs. Fitted on the first 70% of history, scored on the last 30% with an embargo between them. A saved model becomes an indicator. |
 | **Seasonality** | Month-by-year return grid, per-month averages and hit rates, day-of-week returns. |
@@ -150,6 +150,11 @@ polls (every 5 s for estimates) still re-anchor to the exchange and add the next
 chart opens its next bar from the pushed candle as soon as the minute turns. The status line adds
 "streaming" while the line is up. If it drops, it reconnects with growing waits and the polls carry
 on as before.
+
+Price and drawn-line alerts on a future with a live estimate or on an `XYZ:` market are checked on
+every trade as well as once a minute, and say "live" when a trade set them off. An alert on a stock
+is not: outside regular hours its newest value is an estimate, and the minute check reads the
+session's close.
 
 ## The shared page
 
